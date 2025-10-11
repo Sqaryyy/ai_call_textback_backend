@@ -1,0 +1,138 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: afterhours_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: PipiPipi1!
+      POSTGRES_DB: afterhours
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - afterhours_network
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: afterhours_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - afterhours_network
+
+  # FastAPI Application (Webhook & Admin API)
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: afterhours_app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - ..:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - afterhours_network
+
+  # Celery Worker (Conversations Queue)
+  celery_conversations:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: afterhours_celery_conversations
+    command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=conversations -n conversations@%h
+    environment:
+      DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - afterhours_network
+
+  # Celery Worker (Calls Queue)
+  celery_calls:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: afterhours_celery_calls
+    command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=calls -n calls@%h
+    environment:
+      DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - afterhours_network
+
+  # Celery Worker (Appointments Queue)
+  celery_appointments:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: afterhours_celery_appointments
+    command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=appointments -n appointments@%h
+    environment:
+      DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - afterhours_network
+
+  # Nginx (Frontend + Reverse Proxy)
+  nginx:
+    image: nginx:alpine
+    container_name: afterhours_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ../../frontend/build:/usr/share/nginx/html
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - afterhours_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  afterhours_network:
+    driver: bridge
