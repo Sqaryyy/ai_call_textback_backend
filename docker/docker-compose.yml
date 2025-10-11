@@ -115,16 +115,29 @@ services:
     networks:
       - afterhours_network
 
-  # Nginx (Frontend + Reverse Proxy)
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    container_name: afterhours_frontend
+    environment:
+      - NODE_ENV=production
+    networks:
+      - afterhours_network
+
+  # Nginx Reverse Proxy
   nginx:
     image: nginx:alpine
     container_name: afterhours_nginx
     ports:
       - "80:80"
+      - "443:443"
     volumes:
-      - ../../frontend/build:/usr/share/nginx/html
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
+      - frontend
       - app
     networks:
       - afterhours_network
