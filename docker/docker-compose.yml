@@ -46,6 +46,8 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
+    env_file:
+      - ../.env
     environment:
       DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
       REDIS_URL: redis://redis:6379/0
@@ -68,6 +70,8 @@ services:
       dockerfile: docker/Dockerfile
     container_name: afterhours_celery_conversations
     command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=conversations -n conversations@%h
+    env_file:
+      - ../.env
     environment:
       DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
       REDIS_URL: redis://redis:6379/0
@@ -86,6 +90,8 @@ services:
       dockerfile: docker/Dockerfile
     container_name: afterhours_celery_calls
     command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=calls -n calls@%h
+    env_file:
+      - ../.env
     environment:
       DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
       REDIS_URL: redis://redis:6379/0
@@ -104,6 +110,8 @@ services:
       dockerfile: docker/Dockerfile
     container_name: afterhours_celery_appointments
     command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=appointments -n appointments@%h
+    env_file:
+      - ../.env
     environment:
       DATABASE_URL: postgresql://postgres:PipiPipi1!@postgres:5432/afterhours
       REDIS_URL: redis://redis:6379/0
