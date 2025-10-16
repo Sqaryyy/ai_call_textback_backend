@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict
 import logging
+import json
 
 import msal
 import requests
@@ -10,25 +11,28 @@ from cryptography.fernet import Fernet
 from sqlalchemy.orm import Session
 
 from app.models import CalendarIntegration
+from app.config.redis import get_redis
 
 logger = logging.getLogger(__name__)
 
 
 class OutlookCalendarService:
-    # FIXED: Remove 'offline_access' - MSAL adds it automatically
     SCOPES = ['Calendars.ReadWrite']
     AUTHORITY = 'https://login.microsoftonline.com/common'
     GRAPH_ENDPOINT = 'https://graph.microsoft.com/v1.0'
+    AUTH_FLOW_TTL = 600  # 10 minutes
 
     def __init__(self):
         self.client_id = os.getenv('MICROSOFT_CLIENT_ID')
         self.client_secret = os.getenv('MICROSOFT_CLIENT_SECRET')
         self.redirect_uri = os.getenv('MICROSOFT_REDIRECT_URI')
         self.fernet = Fernet(os.getenv('CALENDAR_ENCRYPTION_KEY').encode())
-        # Store for auth flow state (in production, use Redis)
-        self._auth_flows = {}
 
-    def generate_authorization_url(self, business_id: str) -> str:
+    def _get_auth_flow_key(self, business_id: str) -> str:
+        """Generate Redis key for auth flow"""
+        return f"outlook_auth_flow:{business_id}"
+
+    async def generate_authorization_url(self, business_id: str) -> str:
         """Generate Microsoft OAuth URL"""
         app = msal.ConfidentialClientApplication(
             self.client_id,
@@ -43,13 +47,22 @@ class OutlookCalendarService:
             state=business_id
         )
 
-        # Store the auth flow for later use in callback
-        # In production, store this in Redis with TTL of 10 minutes
-        self._auth_flows[business_id] = auth_flow
+        # Store the auth flow in Redis with TTL
+        redis_client = await get_redis()
+        try:
+            key = self._get_auth_flow_key(business_id)
+            await redis_client.setex(
+                key,
+                self.AUTH_FLOW_TTL,
+                json.dumps(auth_flow)
+            )
+            logger.info(f"Stored auth flow in Redis with key: {key}")
+        finally:
+            await redis_client.close()
 
-        return auth_flow['auth_uri']  # Return the actual URL string
+        return auth_flow['auth_uri']
 
-    def handle_oauth_callback(self, code: str, state: str, db):
+    async def handle_oauth_callback(self, code: str, state: str, db):
         """Exchange code for tokens"""
         business_id = state
 
@@ -59,10 +72,22 @@ class OutlookCalendarService:
             client_credential=self.client_secret
         )
 
-        # Retrieve the stored auth_flow
-        auth_flow = self._auth_flows.get(business_id)
-        if not auth_flow:
-            raise ValueError("Auth flow not found. Please restart the authorization process.")
+        # Retrieve the stored auth_flow from Redis
+        redis_client = await get_redis()
+        try:
+            key = self._get_auth_flow_key(business_id)
+            auth_flow_json = await redis_client.get(key)
+
+            if not auth_flow_json:
+                logger.error(f"Auth flow not found in Redis for key: {key}")
+                raise ValueError("Auth flow not found. Please restart the authorization process.")
+
+            auth_flow = json.loads(auth_flow_json)
+
+            # Clean up Redis entry
+            await redis_client.delete(key)
+        finally:
+            await redis_client.close()
 
         # Build auth_response from the callback parameters
         auth_response = {
@@ -76,10 +101,8 @@ class OutlookCalendarService:
             auth_response=auth_response
         )
 
-        # Clean up stored auth flow
-        self._auth_flows.pop(business_id, None)
-
         if "error" in result:
+            logger.error(f"Token exchange error: {result.get('error_description')}")
             raise ValueError(f"Auth error: {result.get('error_description')}")
 
         # Get calendars
@@ -121,20 +144,19 @@ class OutlookCalendarService:
         db.add(integration)
         db.commit()
 
-        # FIXED: Add task trigger like Google service
+        # Trigger calendar sync
         from app.tasks.calendar_tasks import sync_calendar_connection
         sync_calendar_connection.delay(str(integration.id))
 
+        logger.info(f"Successfully created Outlook integration for business {business_id}")
         return integration
 
     def _get_valid_access_token(self, integration: CalendarIntegration, db: Session) -> str:
         """Get valid access token, refreshing if necessary"""
-        # FIXED: Use timezone-aware datetime like Google service
         now = datetime.now(timezone.utc)
 
         # Check if token is expired (with 5 min buffer)
         if integration.token_expires_at <= now + timedelta(minutes=5):
-            # Refresh token
             self.refresh_access_token(integration, db)
 
         # Decrypt and return access token
@@ -172,13 +194,10 @@ class OutlookCalendarService:
             start_date: datetime,
             end_date: datetime,
             duration_minutes: int,
-            business_hours_start: int = 8,  # FIXED: Add parameters like Google
+            business_hours_start: int = 8,
             business_hours_end: int = 18
     ) -> List[Dict]:
-        """
-        Get available time slots from Outlook Calendar using Microsoft Graph API
-        """
-        # FIXED: Validate time range like Google service
+        """Get available time slots from Outlook Calendar"""
         if end_date <= start_date:
             raise ValueError(f"end_date ({end_date}) must be after start_date ({start_date})")
 
@@ -187,13 +206,11 @@ class OutlookCalendarService:
 
         calendar_id = integration.provider_config.get('selected_calendar_id')
 
-        # FIXED: Ensure timezone-aware date times
         if start_date.tzinfo is None:
             start_date = start_date.replace(tzinfo=timezone.utc)
         if end_date.tzinfo is None:
             end_date = end_date.replace(tzinfo=timezone.utc)
 
-        # Get calendar view (all events in time range)
         params = {
             'startDateTime': start_date.isoformat(),
             'endDateTime': end_date.isoformat()
@@ -214,15 +231,12 @@ class OutlookCalendarService:
         # Convert events to busy periods
         busy_periods = []
         for event in events:
-            # Skip declined events
             if event.get('responseStatus', {}).get('response') == 'declined':
                 continue
 
-            # FIXED: Handle timezone properly
             start_str = event['start']['dateTime']
             end_str = event['end']['dateTime']
 
-            # Add timezone info if not present
             if not start_str.endswith('Z') and '+' not in start_str:
                 start_str += 'Z'
             if not end_str.endswith('Z') and '+' not in end_str:
@@ -233,42 +247,31 @@ class OutlookCalendarService:
                 'end': datetime.fromisoformat(end_str.replace('Z', '+00:00'))
             })
 
-        # Sort busy periods by start time
         busy_periods.sort(key=lambda x: x['start'])
 
-        # Generate slots by finding gaps
+        # Generate available slots
         slots = []
         current_time = start_date
 
         while current_time < end_date:
             slot_end = current_time + timedelta(minutes=duration_minutes)
 
-            # Don't create slots that extend past end_date
             if slot_end > end_date:
                 break
 
-            # Check if this slot overlaps with any busy period
             is_available = True
             for busy in busy_periods:
-                # Skip busy periods that are completely before current slot
                 if busy['end'] <= current_time:
                     continue
-
-                # If busy period starts after this slot ends, we're done checking
                 if busy['start'] >= slot_end:
                     break
-
-                # Overlaps with busy period
                 if current_time < busy['end'] and slot_end > busy['start']:
                     is_available = False
-                    # Jump to end of busy period
                     current_time = busy['end']
                     break
 
             if is_available:
-                # FIXED: Use parameterized business hours like Google
                 if business_hours_start <= current_time.hour < business_hours_end:
-                    # Ensure slot doesn't extend past business hours
                     slot_end_hour = slot_end.hour + (slot_end.minute / 60)
                     if slot_end_hour <= business_hours_end:
                         slots.append({
@@ -277,14 +280,12 @@ class OutlookCalendarService:
                             'duration_minutes': duration_minutes
                         })
 
-                # Move to next potential slot
                 current_time += timedelta(minutes=duration_minutes)
 
-            # Safety check: if we're stuck, break
             if current_time >= end_date:
                 break
 
-        logger.info(f"Generated {len(slots)} available slots between {start_date} and {end_date}")
+        logger.info(f"Generated {len(slots)} available slots")
         return slots
 
     async def create_event(
@@ -293,16 +294,7 @@ class OutlookCalendarService:
             db: Session,
             event_data: Dict
     ) -> Dict:
-        """
-        Create a calendar event in Outlook
-
-        event_data should contain:
-        - summary: Event title (mapped to subject)
-        - description: Event description (mapped to body)
-        - start: Start datetime
-        - end: End datetime
-        - attendees: List of email addresses (optional)
-        """
+        """Create a calendar event in Outlook"""
         access_token = self._get_valid_access_token(integration, db)
         headers = {
             'Authorization': f'Bearer {access_token}',
@@ -311,7 +303,6 @@ class OutlookCalendarService:
 
         calendar_id = integration.provider_config.get('selected_calendar_id')
 
-        # FIXED: Map summary/description to subject/body for consistency with Google
         event = {
             'subject': event_data.get('summary') or event_data.get('subject'),
             'body': {
@@ -328,7 +319,6 @@ class OutlookCalendarService:
             }
         }
 
-        # Add attendees if provided
         if event_data.get('attendees'):
             event['attendees'] = [
                 {
@@ -338,7 +328,6 @@ class OutlookCalendarService:
                 for email in event_data['attendees']
             ]
 
-        # Create the event
         response = requests.post(
             f"{self.GRAPH_ENDPOINT}/me/calendars/{calendar_id}/events",
             headers=headers,
@@ -370,10 +359,8 @@ class OutlookCalendarService:
             'Content-Type': 'application/json'
         }
 
-        # Build update payload with only provided fields
         update_payload = {}
 
-        # FIXED: Handle both summary/subject and description/body
         if 'summary' in event_data or 'subject' in event_data:
             update_payload['subject'] = event_data.get('summary') or event_data.get('subject')
         if 'description' in event_data or 'body' in event_data:
@@ -392,7 +379,6 @@ class OutlookCalendarService:
                 'timeZone': 'UTC'
             }
 
-        # Update the event
         response = requests.patch(
             f"{self.GRAPH_ENDPOINT}/me/events/{event_id}",
             headers=headers,
@@ -425,7 +411,6 @@ class OutlookCalendarService:
                 f"{self.GRAPH_ENDPOINT}/me/events/{event_id}",
                 headers=headers
             )
-
             return response.status_code == 204
         except Exception as e:
             logger.error(f"Failed to delete event: {e}")
