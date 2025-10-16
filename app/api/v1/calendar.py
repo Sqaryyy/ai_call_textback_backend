@@ -61,7 +61,7 @@ async def select_google_calendar(
 async def initiate_outlook_auth(business_id: str):
     """Returns authorization URL for business owner to visit"""
     service = OutlookCalendarService()
-    auth_url = service.generate_authorization_url(business_id)
+    auth_url = await service.generate_authorization_url(business_id)  # ← ADD await
     return {"authorization_url": auth_url}
 
 
@@ -73,7 +73,7 @@ async def outlook_callback(
 ):
     """Microsoft redirects here after authorization"""
     service = OutlookCalendarService()
-    integration = service.handle_oauth_callback(code, state, db)
+    integration = await service.handle_oauth_callback(code, state, db)  # ← ADD await
 
     return {
         "success": True,
