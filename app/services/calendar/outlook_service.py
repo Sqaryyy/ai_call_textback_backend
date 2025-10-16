@@ -2,6 +2,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict
+import logging
 
 import msal
 import requests
@@ -10,8 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.models import CalendarIntegration
 
+logger = logging.getLogger(__name__)
+
 
 class OutlookCalendarService:
+    # FIXED: Remove 'offline_access' - MSAL adds it automatically
     SCOPES = ['Calendars.ReadWrite']
     AUTHORITY = 'https://login.microsoftonline.com/common'
     GRAPH_ENDPOINT = 'https://graph.microsoft.com/v1.0'
@@ -21,6 +25,8 @@ class OutlookCalendarService:
         self.client_secret = os.getenv('MICROSOFT_CLIENT_SECRET')
         self.redirect_uri = os.getenv('MICROSOFT_REDIRECT_URI')
         self.fernet = Fernet(os.getenv('CALENDAR_ENCRYPTION_KEY').encode())
+        # Store for auth flow state (in production, use Redis)
+        self._auth_flows = {}
 
     def generate_authorization_url(self, business_id: str) -> str:
         """Generate Microsoft OAuth URL"""
@@ -30,13 +36,18 @@ class OutlookCalendarService:
             client_credential=self.client_secret
         )
 
-        auth_url = app.initiate_auth_code_flow(
+        # initiate_auth_code_flow returns a dict with auth_uri and state
+        auth_flow = app.initiate_auth_code_flow(
             scopes=self.SCOPES,
             redirect_uri=self.redirect_uri,
             state=business_id
         )
 
-        return auth_url
+        # Store the auth flow for later use in callback
+        # In production, store this in Redis with TTL of 10 minutes
+        self._auth_flows[business_id] = auth_flow
+
+        return auth_flow['auth_uri']  # Return the actual URL string
 
     def handle_oauth_callback(self, code: str, state: str, db):
         """Exchange code for tokens"""
@@ -48,12 +59,25 @@ class OutlookCalendarService:
             client_credential=self.client_secret
         )
 
-        # Correct method with proper parameters
+        # Retrieve the stored auth_flow
+        auth_flow = self._auth_flows.get(business_id)
+        if not auth_flow:
+            raise ValueError("Auth flow not found. Please restart the authorization process.")
+
+        # Build auth_response from the callback parameters
+        auth_response = {
+            'code': code,
+            'state': state
+        }
+
+        # Exchange code for tokens using the stored auth_flow
         result = app.acquire_token_by_auth_code_flow(
-            code=code,
-            scopes=self.SCOPES,
-            redirect_uri=self.redirect_uri
+            auth_code_flow=auth_flow,
+            auth_response=auth_response
         )
+
+        # Clean up stored auth flow
+        self._auth_flows.pop(business_id, None)
 
         if "error" in result:
             raise ValueError(f"Auth error: {result.get('error_description')}")
@@ -64,6 +88,10 @@ class OutlookCalendarService:
             f"{self.GRAPH_ENDPOINT}/me/calendars",
             headers=headers
         )
+
+        if calendars_response.status_code != 200:
+            raise Exception(f"Failed to fetch calendars: {calendars_response.text}")
+
         calendars = calendars_response.json()['value']
 
         # Encrypt tokens
@@ -86,18 +114,26 @@ class OutlookCalendarService:
                     {'id': cal['id'], 'name': cal['name']}
                     for cal in calendars
                 ],
-                'selected_calendar_id': calendars[0]['id']
+                'selected_calendar_id': calendars[0]['id'] if calendars else None
             }
         )
 
         db.add(integration)
         db.commit()
+
+        # FIXED: Add task trigger like Google service
+        from app.tasks.calendar_tasks import sync_calendar_connection
+        sync_calendar_connection.delay(str(integration.id))
+
         return integration
 
     def _get_valid_access_token(self, integration: CalendarIntegration, db: Session) -> str:
         """Get valid access token, refreshing if necessary"""
+        # FIXED: Use timezone-aware datetime like Google service
+        now = datetime.now(timezone.utc)
+
         # Check if token is expired (with 5 min buffer)
-        if integration.token_expires_at <= datetime.now(timezone.utc) + timedelta(minutes=5):
+        if integration.token_expires_at <= now + timedelta(minutes=5):
             # Refresh token
             self.refresh_access_token(integration, db)
 
@@ -135,15 +171,27 @@ class OutlookCalendarService:
             db: Session,
             start_date: datetime,
             end_date: datetime,
-            duration_minutes: int
+            duration_minutes: int,
+            business_hours_start: int = 8,  # FIXED: Add parameters like Google
+            business_hours_end: int = 18
     ) -> List[Dict]:
         """
         Get available time slots from Outlook Calendar using Microsoft Graph API
         """
+        # FIXED: Validate time range like Google service
+        if end_date <= start_date:
+            raise ValueError(f"end_date ({end_date}) must be after start_date ({start_date})")
+
         access_token = self._get_valid_access_token(integration, db)
         headers = {'Authorization': f'Bearer {access_token}'}
 
         calendar_id = integration.provider_config.get('selected_calendar_id')
+
+        # FIXED: Ensure timezone-aware date times
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
 
         # Get calendar view (all events in time range)
         params = {
@@ -158,6 +206,7 @@ class OutlookCalendarService:
         )
 
         if response.status_code != 200:
+            logger.error(f"Microsoft Graph API error: {response.text}")
             raise Exception(f"Failed to fetch calendar events: {response.text}")
 
         events = response.json()['value']
@@ -169,9 +218,19 @@ class OutlookCalendarService:
             if event.get('responseStatus', {}).get('response') == 'declined':
                 continue
 
+            # FIXED: Handle timezone properly
+            start_str = event['start']['dateTime']
+            end_str = event['end']['dateTime']
+
+            # Add timezone info if not present
+            if not start_str.endswith('Z') and '+' not in start_str:
+                start_str += 'Z'
+            if not end_str.endswith('Z') and '+' not in end_str:
+                end_str += 'Z'
+
             busy_periods.append({
-                'start': datetime.fromisoformat(event['start']['dateTime']),
-                'end': datetime.fromisoformat(event['end']['dateTime'])
+                'start': datetime.fromisoformat(start_str.replace('Z', '+00:00')),
+                'end': datetime.fromisoformat(end_str.replace('Z', '+00:00'))
             })
 
         # Sort busy periods by start time
@@ -184,9 +243,22 @@ class OutlookCalendarService:
         while current_time < end_date:
             slot_end = current_time + timedelta(minutes=duration_minutes)
 
+            # Don't create slots that extend past end_date
+            if slot_end > end_date:
+                break
+
             # Check if this slot overlaps with any busy period
             is_available = True
             for busy in busy_periods:
+                # Skip busy periods that are completely before current slot
+                if busy['end'] <= current_time:
+                    continue
+
+                # If busy period starts after this slot ends, we're done checking
+                if busy['start'] >= slot_end:
+                    break
+
+                # Overlaps with busy period
                 if current_time < busy['end'] and slot_end > busy['start']:
                     is_available = False
                     # Jump to end of busy period
@@ -194,15 +266,25 @@ class OutlookCalendarService:
                     break
 
             if is_available:
-                # Only include slots during business hours (8 AM - 6 PM)
-                if 8 <= current_time.hour < 18:
-                    slots.append({
-                        'start': current_time.isoformat(),
-                        'end': slot_end.isoformat(),
-                        'duration_minutes': duration_minutes
-                    })
+                # FIXED: Use parameterized business hours like Google
+                if business_hours_start <= current_time.hour < business_hours_end:
+                    # Ensure slot doesn't extend past business hours
+                    slot_end_hour = slot_end.hour + (slot_end.minute / 60)
+                    if slot_end_hour <= business_hours_end:
+                        slots.append({
+                            'start': current_time.isoformat(),
+                            'end': slot_end.isoformat(),
+                            'duration_minutes': duration_minutes
+                        })
+
+                # Move to next potential slot
                 current_time += timedelta(minutes=duration_minutes)
 
+            # Safety check: if we're stuck, break
+            if current_time >= end_date:
+                break
+
+        logger.info(f"Generated {len(slots)} available slots between {start_date} and {end_date}")
         return slots
 
     async def create_event(
@@ -215,8 +297,8 @@ class OutlookCalendarService:
         Create a calendar event in Outlook
 
         event_data should contain:
-        - subject: Event title
-        - body: Event description
+        - summary: Event title (mapped to subject)
+        - description: Event description (mapped to body)
         - start: Start datetime
         - end: End datetime
         - attendees: List of email addresses (optional)
@@ -229,12 +311,12 @@ class OutlookCalendarService:
 
         calendar_id = integration.provider_config.get('selected_calendar_id')
 
-        # Format event for Microsoft Graph API
+        # FIXED: Map summary/description to subject/body for consistency with Google
         event = {
-            'subject': event_data.get('subject'),
+            'subject': event_data.get('summary') or event_data.get('subject'),
             'body': {
                 'contentType': 'HTML',
-                'content': event_data.get('body', '')
+                'content': event_data.get('description', '') or event_data.get('body', '')
             },
             'start': {
                 'dateTime': event_data['start'].isoformat(),
@@ -291,12 +373,13 @@ class OutlookCalendarService:
         # Build update payload with only provided fields
         update_payload = {}
 
-        if 'subject' in event_data:
-            update_payload['subject'] = event_data['subject']
-        if 'body' in event_data:
+        # FIXED: Handle both summary/subject and description/body
+        if 'summary' in event_data or 'subject' in event_data:
+            update_payload['subject'] = event_data.get('summary') or event_data.get('subject')
+        if 'description' in event_data or 'body' in event_data:
             update_payload['body'] = {
                 'contentType': 'HTML',
-                'content': event_data['body']
+                'content': event_data.get('description', '') or event_data.get('body', '')
             }
         if 'start' in event_data:
             update_payload['start'] = {
@@ -345,5 +428,5 @@ class OutlookCalendarService:
 
             return response.status_code == 204
         except Exception as e:
-            print(f"Failed to delete event: {e}")
+            logger.error(f"Failed to delete event: {e}")
             return False
