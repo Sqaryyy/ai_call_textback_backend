@@ -12,7 +12,7 @@ from app.models import CalendarIntegration
 
 
 class OutlookCalendarService:
-    SCOPES = ['Calendars.ReadWrite', 'offline_access']
+    SCOPES = ['Calendars.ReadWrite']
     AUTHORITY = 'https://login.microsoftonline.com/common'
     GRAPH_ENDPOINT = 'https://graph.microsoft.com/v1.0'
 
