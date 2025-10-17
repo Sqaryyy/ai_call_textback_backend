@@ -1,4 +1,5 @@
 # app/services/calendar/google_calendar_service.py
+import os
 from datetime import timedelta, datetime, timezone
 from typing import List, Dict
 
@@ -27,7 +28,7 @@ class GoogleCalendarService:
             "web": {
                 "client_id": settings.GOOGLE_CLIENT_ID,
                 "client_secret": settings.GOOGLE_CLIENT_SECRET,
-                "redirect_uris": ["http://localhost:8000/api/v1/calendar/google/callback"],
+                "redirect_uris": [os.getenv("GOOGLE_REDIRECT_URI")],
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token"
             }
