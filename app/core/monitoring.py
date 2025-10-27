@@ -1,7 +1,6 @@
 """Health checks and monitoring endpoints"""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-import redis.asyncio as redis
 
 from app.config.database import get_db
 from app.config.redis import get_redis

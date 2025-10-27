@@ -17,10 +17,29 @@ class Settings(BaseSettings):
     APP_NAME: str = Field(default="After-Hours Service")
     SECRET_KEY: str = Field(default="change-this-in-production")
 
+    # JWT Authentication settings
+    JWT_SECRET_KEY: str = Field(
+        default="change-this-jwt-secret-in-production-use-long-random-string"
+    )
+    JWT_ALGORITHM: str = Field(default="HS256")
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=60)  # 1 hour
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=30)  # 30 days
+
     # Server settings
     HOST: str = Field(default="0.0.0.0")
     PORT: int = Field(default=8000)
     ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
+
+    EMAIL_HOST: str = "smtp.gmail.com"  # or your SMTP provider
+    EMAIL_PORT: int = 587
+    EMAIL_USE_TLS: bool = True
+    EMAIL_USERNAME: str = "voxiodesk@gmail.com"  # Your SMTP username
+    EMAIL_PASSWORD: str = "ytwk sigq ssyn nnmi"  # Your SMTP password or app password
+    EMAIL_FROM_ADDRESS: str = "voxiodesk@gmail.com"
+    EMAIL_FROM_NAME: str = "VoxioDesk"
+
+    # Frontend settings
+    FRONTEND_URL: str = Field(default="http://localhost:3000")
 
     # Database settings
     DATABASE_URL: str = Field(
@@ -52,6 +71,7 @@ class Settings(BaseSettings):
     GOOGLE_CREDENTIALS_PATH: Optional[str] = None
     GOOGLE_CLIENT_ID: str = Field(default="")
     GOOGLE_CLIENT_SECRET: str = Field(default="")
+    GOOGLE_REDIRECT_URI: str = Field(default="http://localhost:3000/callback/google")
 
     # Business settings
     DEFAULT_TIMEZONE: str = Field(default="UTC")
@@ -105,3 +125,7 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance"""
     return Settings()
+
+
+# Convenience accessor for settings
+settings = get_settings()

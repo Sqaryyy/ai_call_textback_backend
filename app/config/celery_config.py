@@ -32,6 +32,7 @@ def create_celery_app() -> Celery:
             "app.tasks.appointment_tasks.*": {"queue": "appointments"},
             "app.tasks.calendar_tasks.*": {"queue": "appointments"},
             "app.tasks.maintenance_tasks.*": {"queue": "maintenance"},
+            "app.tasks.email_tasks.*": {"queue": "emails"},
         },
 
         # Queue definitions
@@ -40,6 +41,7 @@ def create_celery_app() -> Celery:
             Queue("calls", routing_key="calls"),
             Queue("appointments", routing_key="appointments"),
             Queue("maintenance", routing_key="maintenance"),
+            Queue("emails", routing_key="emails"),
         ),
 
         # Worker settings
@@ -62,6 +64,7 @@ def create_celery_app() -> Celery:
         "app.tasks.appointment_tasks",
         "app.tasks.calendar_tasks",
         "app.tasks.maintenance_tasks",
+        "app.tasks.email_tasks",
     ])
 
     return celery_app

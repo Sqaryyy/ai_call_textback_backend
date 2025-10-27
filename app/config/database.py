@@ -1,4 +1,3 @@
-# app/config/database.py - FIXED
 """Database configuration and connection setup"""
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -18,7 +17,6 @@ engine = create_engine(
     echo=False,
 )
 
-# Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -32,54 +30,46 @@ def get_db():
 
 
 def create_tables():
-    """Create all database tables"""
-    # Import all models to register them
-    from app.models.business import Base as BusinessBase
-    from app.models.business_knowledge import Base as KnowledgeBase
+    """Drop and recreate all database tables"""
+    from app.models.business import Base  # shared Base
+    import app.models.user
+    import app.models.refresh_token
+    import app.models.api_key
+    import app.models.api_request_log
+    import app.models.email_verification
+    import app.models.invite
+    import app.models.password_reset
+    import app.models.webhook_event
+    import app.models.webhook_endpoint
+    import app.models.business_knowledge
+    import app.models
 
-    print("Dropping all tables with CASCADE...")
-
-    # Use raw SQL to drop with CASCADE
+    print("Dropping existing tables with CASCADE...")
     with engine.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS business_knowledge CASCADE"))
-        conn.execute(text("DROP TABLE IF EXISTS business_hours CASCADE"))
-        conn.execute(text("DROP TABLE IF EXISTS businesses CASCADE"))
-        conn.execute(text("DROP TYPE IF EXISTS knowledge_category CASCADE"))
+        conn.execute(text("DROP SCHEMA public CASCADE;"))
+        conn.execute(text("CREATE SCHEMA public;"))
         conn.commit()
 
-    print("Creating pgvector extension...")
+    print("Creating required extensions...")
     with engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        conn.commit()
-
-    print("Creating knowledge_category enum...")
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TYPE knowledge_category AS ENUM (
-                'service_info',
-                'pricing',
-                'policies',
-                'faq',
-                'business_hours',
-                'contact_info',
-                'general'
-            )
-        """))
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto;"))
         conn.commit()
 
     print("Creating all tables...")
-    BusinessBase.metadata.create_all(bind=engine)
-    KnowledgeBase.metadata.create_all(bind=engine)
 
-    print("Creating vector indexes...")
+    print("Creating required ENUMs...")
     with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_business_knowledge_embedding 
-            ON business_knowledge 
-            USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100)
-        """))
+        result = conn.execute(
+            text("SELECT 1 FROM pg_type WHERE typname = 'invitetype';")
+        ).fetchone()
+        if not result:
+            conn.execute(
+                text("CREATE TYPE invitetype AS ENUM ('business', 'platform');")
+            )
         conn.commit()
+
+    Base.metadata.create_all(bind=engine)
 
     print("✅ Database tables created successfully!")
 

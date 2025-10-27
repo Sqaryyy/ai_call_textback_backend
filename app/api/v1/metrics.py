@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+# app/api/v1/metrics.py
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from app.config.database import get_db
 from app.models.conversation_metrics import ConversationMetrics
-from uuid import UUID
+from app.models.api_key import APIKey
+from app.api.dependencies import require_api_key, require_scope
 
-router = APIRouter(tags=["metrics"])
+router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 
 def get_month_range(year: int = None, month: int = None):
@@ -29,38 +31,31 @@ def get_month_range(year: int = None, month: int = None):
     return start_date, end_date
 
 
-def validate_business_id(business_id: str) -> UUID:
-    """Convert and validate business_id string to UUID"""
-    try:
-        return UUID(business_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid business_id format")
-
-
-@router.get("/{business_id}/summary")
+@router.get("/summary")
 async def get_metrics_summary(
-        business_id: str,
-        year: int = Query(None, description="Year (defaults to current)"),
-        month: int = Query(None, description="Month 1-12 (defaults to current)"),
-        db: Session = Depends(get_db)
+    year: int = Query(None, description="Year (defaults to current)"),
+    month: int = Query(None, description="Month 1-12 (defaults to current)"),
+    api_key: APIKey = Depends(require_api_key),
+    _: None = Depends(require_scope("read:metrics")),
+    db: Session = Depends(get_db)
 ):
     """
-    Get high-level metrics summary for a business for a specific month
+    Get high-level metrics summary for your business for a specific month.
     Returns key performance indicators like total conversations, bookings, etc.
     """
-    business_uuid = validate_business_id(business_id)
+    business_id = api_key.business_id
     start_date, end_date = get_month_range(year, month)
 
     # Query all metrics for this business in the time period
     metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_uuid,
+        ConversationMetrics.business_id == business_id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).all()
 
     if not metrics:
         return {
-            "business_id": business_id,
+            "business_id": str(business_id),
             "period": f"{year}-{month:02d}" if year and month else f"{datetime.now().year}-{datetime.now().month:02d}",
             "total_conversations": 0,
             "customer_responses": 0,
@@ -91,7 +86,7 @@ async def get_metrics_summary(
         conversation_durations) if conversation_durations else None
 
     return {
-        "business_id": business_id,
+        "business_id": str(business_id),
         "period": f"{year}-{month:02d}" if year and month else f"{datetime.now().year}-{datetime.now().month:02d}",
         "total_conversations": total_conversations,
         "customer_responses": customer_responses,
@@ -111,25 +106,26 @@ async def get_metrics_summary(
     }
 
 
-@router.get("/{business_id}/conversations")
+@router.get("/conversations")
 async def get_conversations(
-        business_id: str,
-        year: int = Query(None),
-        month: int = Query(None),
-        skip: int = Query(0, ge=0),
-        limit: int = Query(20, ge=1, le=100),
-        db: Session = Depends(get_db)
+    year: int = Query(None),
+    month: int = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    api_key: APIKey = Depends(require_api_key),
+    _: None = Depends(require_scope("read:metrics")),
+    db: Session = Depends(get_db)
 ):
     """
-    Get detailed conversation metrics for a business
-    Includes individual conversation details sorted by most recent
+    Get detailed conversation metrics for your business.
+    Includes individual conversation details sorted by most recent.
     """
-    business_uuid = validate_business_id(business_id)
+    business_id = api_key.business_id
     start_date, end_date = get_month_range(year, month)
 
     # Query and sort by most recent
     query = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_uuid,
+        ConversationMetrics.business_id == business_id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).order_by(ConversationMetrics.created_at.desc())
@@ -138,7 +134,7 @@ async def get_conversations(
     conversations = query.offset(skip).limit(limit).all()
 
     return {
-        "business_id": business_id,
+        "business_id": str(business_id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "total_conversations": total,
         "page": {
@@ -173,25 +169,26 @@ async def get_conversations(
     }
 
 
-@router.get("/{business_id}/bookings")
+@router.get("/bookings")
 async def get_bookings(
-        business_id: str,
-        year: int = Query(None),
-        month: int = Query(None),
-        skip: int = Query(0, ge=0),
-        limit: int = Query(20, ge=1, le=100),
-        db: Session = Depends(get_db)
+    year: int = Query(None),
+    month: int = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    api_key: APIKey = Depends(require_api_key),
+    _: None = Depends(require_scope("read:metrics")),
+    db: Session = Depends(get_db)
 ):
     """
-    Get all booked appointments for a business
-    Shows only conversations that resulted in bookings
+    Get all booked appointments for your business.
+    Shows only conversations that resulted in bookings.
     """
-    business_uuid = validate_business_id(business_id)
+    business_id = api_key.business_id
     start_date, end_date = get_month_range(year, month)
 
     # Query conversations with bookings
     query = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_uuid,
+        ConversationMetrics.business_id == business_id,
         ConversationMetrics.booking_created == True,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
@@ -201,7 +198,7 @@ async def get_bookings(
     bookings = query.offset(skip).limit(limit).all()
 
     return {
-        "business_id": business_id,
+        "business_id": str(business_id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "total_bookings": total,
         "page": {
@@ -229,22 +226,23 @@ async def get_bookings(
     }
 
 
-@router.get("/{business_id}/daily-breakdown")
+@router.get("/daily-breakdown")
 async def get_daily_breakdown(
-        business_id: str,
-        year: int = Query(None),
-        month: int = Query(None),
-        db: Session = Depends(get_db)
+    year: int = Query(None),
+    month: int = Query(None),
+    api_key: APIKey = Depends(require_api_key),
+    _: None = Depends(require_scope("read:metrics")),
+    db: Session = Depends(get_db)
 ):
     """
-    Get day-by-day metrics breakdown for the month
-    Shows trends over time
+    Get day-by-day metrics breakdown for the month.
+    Shows trends over time.
     """
-    business_uuid = validate_business_id(business_id)
+    business_id = api_key.business_id
     start_date, end_date = get_month_range(year, month)
 
     metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_uuid,
+        ConversationMetrics.business_id == business_id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).all()
@@ -284,28 +282,29 @@ async def get_daily_breakdown(
             day_data["booking_rate"] = 0.0
 
     return {
-        "business_id": business_id,
+        "business_id": str(business_id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "daily_breakdown": [daily_data[day] for day in sorted(daily_data.keys())]
     }
 
 
-@router.get("/{business_id}/funnel")
+@router.get("/funnel")
 async def get_conversion_funnel(
-        business_id: str,
-        year: int = Query(None),
-        month: int = Query(None),
-        db: Session = Depends(get_db)
+    year: int = Query(None),
+    month: int = Query(None),
+    api_key: APIKey = Depends(require_api_key),
+    _: None = Depends(require_scope("read:metrics")),
+    db: Session = Depends(get_db)
 ):
     """
-    Get conversion funnel visualization data
-    Shows drop-off at each stage: outreach -> response -> completed -> booking
+    Get conversion funnel visualization data.
+    Shows drop-off at each stage: outreach -> response -> completed -> booking.
     """
-    business_uuid = validate_business_id(business_id)
+    business_id = api_key.business_id
     start_date, end_date = get_month_range(year, month)
 
     metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_uuid,
+        ConversationMetrics.business_id == business_id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).all()
@@ -316,7 +315,7 @@ async def get_conversion_funnel(
     total_bookings = sum(1 for m in metrics if m.booking_created)
 
     return {
-        "business_id": business_id,
+        "business_id": str(business_id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "funnel": [
             {
@@ -346,22 +345,23 @@ async def get_conversion_funnel(
     }
 
 
-@router.get("/{business_id}/dropoff-analysis")
+@router.get("/dropoff-analysis")
 async def get_dropoff_analysis(
-        business_id: str,
-        year: int = Query(None),
-        month: int = Query(None),
-        db: Session = Depends(get_db)
+    year: int = Query(None),
+    month: int = Query(None),
+    api_key: APIKey = Depends(require_api_key),
+    _: None = Depends(require_scope("read:metrics")),
+    db: Session = Depends(get_db)
 ):
     """
-    Analyze where conversations are being dropped off
-    Shows which flow states have the highest abandonment
+    Analyze where conversations are being dropped off.
+    Shows which flow states have the highest abandonment.
     """
-    business_uuid = validate_business_id(business_id)
+    business_id = api_key.business_id
     start_date, end_date = get_month_range(year, month)
 
     dropped_metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_uuid,
+        ConversationMetrics.business_id == business_id,
         ConversationMetrics.dropped_off == True,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
@@ -375,7 +375,7 @@ async def get_dropoff_analysis(
             dropoff_by_state[state] = {
                 "state": state,
                 "count": 0,
-                "avg_duration_minutes": 0
+                "avg_duration_minutes": 0.0
             }
         dropoff_by_state[state]["count"] += 1
 
@@ -388,13 +388,13 @@ async def get_dropoff_analysis(
 
     total_dropped = len(dropped_metrics)
     total_conversations = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_uuid,
+        ConversationMetrics.business_id == business_id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).count()
 
     return {
-        "business_id": business_id,
+        "business_id": str(business_id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "total_dropped": total_dropped,
         "dropoff_rate": round((total_dropped / total_conversations * 100), 2) if total_conversations > 0 else 0.0,
