@@ -3,7 +3,7 @@ from sqlalchemy import Column, String, DateTime, Integer, Text, ForeignKey, Inde
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
 import uuid
-from .business import Base
+from app.models.base import Base
 
 
 class WebhookEvent(Base):

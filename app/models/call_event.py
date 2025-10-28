@@ -2,8 +2,7 @@ from sqlalchemy import Column, String, DateTime, JSON, Text, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 import uuid
-from .business import Base
-
+from app.models.base import Base
 
 class CallEvent(Base):
     __tablename__ = "call_events"

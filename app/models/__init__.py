@@ -1,5 +1,6 @@
 # app/models/__init__.py
-from .business import Base, Business, BusinessHours
+from .base import Base
+from .business import Business, BusinessHours
 from .call_event import CallEvent
 from .conversation import Conversation
 from .message import Message

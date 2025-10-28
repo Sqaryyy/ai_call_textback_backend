@@ -9,8 +9,7 @@ from sqlalchemy.sql import func
 from passlib.context import CryptContext
 import uuid
 import enum
-
-from app.models.business import Base
+from app.models.base import Base
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

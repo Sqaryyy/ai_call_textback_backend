@@ -1,8 +1,7 @@
 from sqlalchemy import Column, String, DateTime, JSON, Boolean, Integer, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
-import uuid
-from .business import Base
+from app.models.base import Base
 
 
 class ConversationState(Base):

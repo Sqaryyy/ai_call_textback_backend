@@ -4,8 +4,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 import uuid
-
-Base = declarative_base()
+from app.models.base import Base
 
 
 class Business(Base):

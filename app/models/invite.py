@@ -9,8 +9,7 @@ from datetime import datetime, timezone
 import uuid
 import secrets
 import enum
-
-from app.models.business import Base
+from app.models.base import Base
 
 
 class InviteType(str, enum.Enum):

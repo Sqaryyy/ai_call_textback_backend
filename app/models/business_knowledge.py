@@ -5,8 +5,7 @@ from sqlalchemy.sql import func
 from pgvector.sqlalchemy import Vector
 import uuid
 import enum
-
-from app.models.business import Base
+from app.models.base import Base
 
 
 class KnowledgeCategory(str, enum.Enum):

@@ -9,8 +9,7 @@ from sqlalchemy.sql import func
 from datetime import datetime, timedelta, timezone
 import uuid
 import secrets
-
-from app.models.business import Base
+from app.models.base import Base
 
 
 class PasswordReset(Base):

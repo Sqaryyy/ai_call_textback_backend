@@ -2,7 +2,7 @@
 from sqlalchemy import Column, String, Boolean, DateTime, LargeBinary, ForeignKey, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime
-from . business import Base
+from app.models.base import Base
 import uuid
 
 

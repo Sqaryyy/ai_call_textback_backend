@@ -1,7 +1,7 @@
 # ===== app/models/availability.py =====
 from sqlalchemy import Column, String, Integer, Boolean, Time, Date, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
-from .business import Base
+from app.models.base import Base
 import uuid
 
 
