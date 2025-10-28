@@ -18,9 +18,23 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create enums
-    op.execute("CREATE TYPE platformrole AS ENUM ('admin', 'user')")
-    op.execute("CREATE TYPE businessrole AS ENUM ('owner', 'member')")
+    # Create enums with proper handling
+    conn = op.get_bind()
+
+    # Check and create platformrole
+    result = conn.execute(sa.text("SELECT 1 FROM pg_type WHERE typname = 'platformrole'"))
+    if not result.scalar():
+        op.execute("CREATE TYPE platformrole AS ENUM ('admin', 'user')")
+
+    # Check and create businessrole
+    result = conn.execute(sa.text("SELECT 1 FROM pg_type WHERE typname = 'businessrole'"))
+    if not result.scalar():
+        op.execute("CREATE TYPE businessrole AS ENUM ('owner', 'member')")
+
+    # Check and create invitetype
+    result = conn.execute(sa.text("SELECT 1 FROM pg_type WHERE typname = 'invitetype'"))
+    if not result.scalar():
+        op.execute("CREATE TYPE invitetype AS ENUM ('business', 'platform')")
 
     # Create users table
     op.create_table('users',

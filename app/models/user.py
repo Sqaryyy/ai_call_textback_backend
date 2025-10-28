@@ -48,7 +48,12 @@ class User(Base):
 
     # Platform role - admin or user
     role = Column(
-        SQLEnum(PlatformRole),
+        SQLEnum(
+            PlatformRole,
+            name="platformrole",
+            create_type=False,
+            values_callable=lambda x: [e.value for e in x]
+        ),
         default=PlatformRole.USER,
         nullable=False,
         index=True
