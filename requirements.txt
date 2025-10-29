@@ -17,7 +17,7 @@ psycopg2-binary==2.9.9
 pgvector==0.2.4
 
 # Data Validation
-pydantic==2.5.0
+pydantic[email]==2.5.0
 pydantic-settings==2.0.3
 
 # Request Handling
