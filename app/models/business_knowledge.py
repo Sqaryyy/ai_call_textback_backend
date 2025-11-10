@@ -1,3 +1,12 @@
+# app/models/business_knowledge.py
+"""
+DEPRECATED: BusinessKnowledge Model
+This model has been replaced by Documents and DocumentChunks.
+Keep this file for backward compatibility during transition period.
+
+After migration is complete and verified, this file can be removed.
+The table will be renamed to 'business_knowledge_deprecated' by the migration.
+"""
 from sqlalchemy import Column, String, Boolean, DateTime, Integer, Text, ForeignKey, Enum as SQLAEnum
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -9,7 +18,10 @@ from app.models.base import Base
 
 
 class KnowledgeCategory(str, enum.Enum):
-    """Categories for business knowledge chunks"""
+    """
+    DEPRECATED: Categories for business knowledge chunks
+    Replaced by DocumentType in new architecture
+    """
     SERVICE_INFO = "service_info"
     PRICING = "pricing"
     POLICIES = "policies"
@@ -21,8 +33,14 @@ class KnowledgeCategory(str, enum.Enum):
 
 class BusinessKnowledge(Base):
     """
-    Stores business knowledge chunks with embeddings for semantic search.
-    Each row represents a piece of information about the business.
+    DEPRECATED: Stores business knowledge chunks with embeddings for semantic search.
+
+    This model is replaced by:
+    - Documents: Source of truth for knowledge
+    - DocumentChunks: Vector chunks with embeddings
+
+    After successful migration, this table will be renamed to 'business_knowledge_deprecated'
+    and this model can be removed from the codebase.
     """
     __tablename__ = "business_knowledge"
 
@@ -44,7 +62,7 @@ class BusinessKnowledge(Base):
         SQLAEnum(
             KnowledgeCategory,
             name="knowledge_category",
-            values_callable=lambda obj: [e.value for e in obj]  # Use values, not names
+            values_callable=lambda obj: [e.value for e in obj]
         ),
         nullable=False,
         index=True
@@ -84,23 +102,38 @@ class BusinessKnowledge(Base):
 
     @classmethod
     def create_chunk(
-        cls,
-        business_id: uuid.UUID,
-        content: str,
-        embedding: list,
-        category: KnowledgeCategory,
-        source_field: str = None,
-        chunk_index: int = 0,
-        extra_metadata: dict = None
+            cls,
+            business_id: uuid.UUID,
+            content: str,
+            embedding: list,
+            category: KnowledgeCategory,
+            source_field: str = None,
+            chunk_index: int = 0,
+            extra_metadata: dict = None
     ):
-        """Factory method to create a knowledge chunk"""
+        """
+        DEPRECATED: Factory method to create a knowledge chunk
+        Use DocumentChunk.create_chunk() instead
+        """
         return cls(
             business_id=business_id,
             content=content,
             embedding=embedding,
-            category=category,  # SQLAlchemy will handle the conversion now
+            category=category,
             source_field=source_field,
             chunk_index=chunk_index,
             extra_metadata=extra_metadata or {},
             is_active=True
         )
+
+
+# Migration mapping for reference
+CATEGORY_TO_DOCTYPE_MAPPING = {
+    KnowledgeCategory.SERVICE_INFO: "general",
+    KnowledgeCategory.PRICING: "general",
+    KnowledgeCategory.POLICIES: "policy",
+    KnowledgeCategory.FAQ: "faq",
+    KnowledgeCategory.BUSINESS_HOURS: "general",
+    KnowledgeCategory.CONTACT_INFO: "general",
+    KnowledgeCategory.GENERAL: "general",
+}

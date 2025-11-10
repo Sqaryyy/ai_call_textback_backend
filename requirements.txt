@@ -15,6 +15,7 @@ flower==2.0.1
 sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
 pgvector==0.2.4
+alembic==1.13.1  # Added for database migrations
 
 # Data Validation
 pydantic[email]==2.5.0
@@ -25,7 +26,7 @@ python-multipart==0.0.6
 httpx~=0.28
 requests==2.31.0
 
-# Configuration
+# ConfigurationN
 python-dotenv==1.0.0
 
 # Logging
@@ -33,7 +34,7 @@ structlog==23.2.0
 
 # External APIs
 twilio==8.10.0
-openai==1.3.7
+openai==1.52.0
 
 # Google Calendar Integration
 google-auth==2.23.4
@@ -49,3 +50,6 @@ cryptography==41.0.7
 bcrypt==4.0.1
 passlib==1.7.4
 python-jose[cryptography]==3.3.0
+
+# Document Processing (NEW)
+PyPDF2==3.0.1  # PDF text extraction for document indexing
