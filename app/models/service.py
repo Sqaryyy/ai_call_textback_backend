@@ -50,7 +50,7 @@ class Service(Base):
     )
 
     # Relationships
-    business = relationship("Business", backref="services")
+    business = relationship("Business", back_populates="service_relationships")
     documents = relationship(
         "Document",
         back_populates="service",

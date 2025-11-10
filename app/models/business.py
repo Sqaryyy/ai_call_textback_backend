@@ -9,6 +9,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 import uuid
 from app.models.base import Base
+from sqlalchemy.orm import relationship
 
 
 class Business(Base):
@@ -41,6 +42,7 @@ class Business(Base):
     # AI behavior overrides (kept for specific business rules)
     ai_instructions = Column(Text, default="")  # Additional instructions not in documents
 
+    service_relationships = relationship("Service", back_populates="business")
     # Technical fields
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(
