@@ -212,7 +212,7 @@ def upgrade():
                 gen_random_uuid(),
                 :document_id,
                 content,
-                embedding,
+                embedding::double precision[],
                 chunk_index,
                 jsonb_build_object(
                     'migrated_from', 'business_knowledge',
