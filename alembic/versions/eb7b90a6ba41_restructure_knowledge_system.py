@@ -135,7 +135,7 @@ def upgrade():
             sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
             sa.Column('document_id', postgresql.UUID(as_uuid=True), nullable=False),
             sa.Column('content', sa.Text(), nullable=False),
-            sa.Column('embedding', postgresql.ARRAY(sa.Float()), nullable=False),  # Will be Vector type
+            sa.Column('embedding', sa.Text(), nullable=False),  # Temporary - will convert to vector
             sa.Column('chunk_index', sa.Integer(), nullable=False, server_default='0'),
             sa.Column('extra_metadata', postgresql.JSONB(), nullable=False, server_default='{}'),
             sa.Column('is_active', sa.Boolean(), nullable=False, server_default='true'),
@@ -145,6 +145,13 @@ def upgrade():
         )
         op.create_index('ix_document_chunks_document_id', 'document_chunks', ['document_id'])
         op.create_index('ix_document_chunks_is_active', 'document_chunks', ['is_active'])
+
+        # Convert embedding column to vector type to match business_knowledge
+        bind = op.get_bind()
+        bind.execute(text("""
+            ALTER TABLE document_chunks 
+            ALTER COLUMN embedding TYPE vector(1536) USING embedding::vector(1536)
+        """))
 
     # ========================================================================
     # STEP 5: Migrate Data from business_knowledge to documents/document_chunks
@@ -212,7 +219,7 @@ def upgrade():
                 gen_random_uuid(),
                 :document_id,
                 content,
-                embedding::double precision[],
+                embedding,
                 chunk_index,
                 jsonb_build_object(
                     'migrated_from', 'business_knowledge',
