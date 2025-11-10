@@ -1,5 +1,6 @@
 """
 Demo API - Interactive SMS conversation testing for potential customers
+File: app/api/demo.py
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,7 @@ from app.services.conversation.conversation_state_service import ConversationSta
 from app.services.message.message_service import MessageService
 from app.services.business.business_service import BusinessService
 from app.services.ai.ai_service import AIService
+from app.services.demo.demo_session_service import DemoSessionService
 from app.models.business import Business
 
 router = APIRouter()
@@ -64,31 +66,6 @@ class GetConversationResponse(BaseModel):
     state: Dict[str, Any]
 
 
-class BusinessContextResponse(BaseModel):
-    business_id: str
-    name: str
-    phone_number: str
-    business_hours: Dict[str, Any]
-    service_catalog: Dict[str, Any]
-    booking_policies: Dict[str, Any]
-    business_info: str
-
-
-class UpdateBusinessContextRequest(BaseModel):
-    name: Optional[str] = None
-    business_hours: Optional[Dict[str, Any]] = None
-    service_catalog: Optional[Dict[str, Any]] = None
-    booking_policies: Optional[Dict[str, Any]] = None
-    business_info: Optional[str] = None
-
-
-# ============================================================================
-# IN-MEMORY SESSION STORAGE (temporary demo sessions)
-# ============================================================================
-# Key: session_id -> Value: { conversation_id, customer_phone, business_id }
-demo_sessions = {}
-
-
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -112,24 +89,17 @@ async def start_demo(
     business_phone = business.phone_number
     business_name = business.name or "our business"
 
-    # Create conversation (marked as demo)
+    # Create conversation
     conversation = ConversationService.find_or_create_conversation(
         db, customer_phone, business_phone, business.id
     )
 
-    # Mark as demo in conversation metadata if possible
-    # (You might want to add an is_demo field to your Conversation model)
-
-    # Generate session ID
-    session_id = str(uuid.uuid4())
-
-    # Store session in memory
-    demo_sessions[session_id] = {
-        "conversation_id": str(conversation.id),
-        "customer_phone": customer_phone,
-        "business_id": str(business.id),
-        "business_overrides": {}  # Store custom business context edits
-    }
+    # Create demo session with mock calendar
+    session_id = DemoSessionService.create_session(
+        conversation_id=str(conversation.id),
+        customer_phone=customer_phone,
+        business_id=str(business.id)
+    )
 
     # Send initial greeting
     greeting = f"Hey, this is {business_name}. We have missed your call. How can we help?"
@@ -163,8 +133,8 @@ async def send_message(
     Send a customer message and get AI response.
     Handles the full conversation flow including function calls.
     """
-    # Get session from memory
-    session = demo_sessions.get(request.session_id)
+    # Get session from DemoSessionService
+    session = DemoSessionService.get_session(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Demo session not found or expired")
 
@@ -257,7 +227,8 @@ async def send_message(
             business_context=business_context,
             conversation_id=conversation_id,
             customer_phone=customer_phone,
-            ai_service=ai_service
+            ai_service=ai_service,
+            session_id=request.session_id
         )
 
         # Log function call
@@ -323,7 +294,7 @@ async def get_conversation(
     Get full conversation history for a demo session.
     Useful for page refresh or reconnection.
     """
-    session = demo_sessions.get(session_id)
+    session = DemoSessionService.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Demo session not found or expired")
 
@@ -351,116 +322,6 @@ async def get_conversation(
     )
 
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
-
-async def execute_demo_function(
-    db: Session,
-    function_name: str,
-    function_args: Dict[str, Any],
-    business_id: str,
-    business_context: Dict[str, Any],
-    conversation_id: str,
-    customer_phone: str,
-    ai_service: AIService
-) -> Dict[str, Any]:
-    """
-    Execute a function call in demo mode.
-    For appointments: return fake success without actually booking.
-    For other functions: execute normally.
-    """
-
-    if function_name == "book_appointment":
-        # DEMO MODE: Don't actually book, just return success
-        return {
-            "success": True,
-            "appointment_id": f"demo-{uuid.uuid4().hex[:8]}",
-            "message": "✨ Demo: Appointment would be booked successfully",
-            "action_completed": True,
-            "demo_mode": True
-        }
-
-    elif function_name == "get_services":
-        return {
-            "services": list(business_context.get("service_catalog", {}).keys())
-        }
-
-    elif function_name == "get_available_slots":
-        try:
-            slots = await ai_service.get_available_slots(
-                db=db,
-                business_id=business_id,
-                service=function_args.get("service", "haircut"),
-                duration_minutes=function_args.get("duration_minutes", 30),
-                start_date=function_args.get("start_date"),
-                end_date=function_args.get("end_date"),
-                limit=function_args.get("limit", 12)
-            )
-            return {"slots": slots, "count": len(slots)}
-        except Exception as e:
-            return {"slots": [], "count": 0, "error": str(e)}
-
-    elif function_name == "get_customer_appointments":
-        # DEMO MODE: Return empty list (no real appointments for demo)
-        return {
-            "success": True,
-            "appointments": [],
-            "demo_mode": True
-        }
-
-    elif function_name == "cancel_appointment":
-        # DEMO MODE: Fake cancellation
-        return {
-            "success": True,
-            "message": "✨ Demo: Appointment would be cancelled",
-            "action_completed": True,
-            "demo_mode": True
-        }
-
-    elif function_name == "reschedule_appointment":
-        # DEMO MODE: Fake reschedule
-        return {
-            "success": True,
-            "message": "✨ Demo: Appointment would be rescheduled",
-            "action_completed": True,
-            "demo_mode": True
-        }
-
-    elif function_name == "get_customer_info":
-        try:
-            result = await ai_service.get_customer_info(
-                db=db,
-                conversation_id=conversation_id
-            )
-            return result
-        except Exception as e:
-            return {
-                "success": False,
-                "customer_info": {},
-                "has_name": False,
-                "has_email": False
-            }
-
-    elif function_name == "set_customer_info":
-        try:
-            result = await ai_service.set_customer_info(
-                db=db,
-                conversation_id=conversation_id,
-                customer_name=function_args.get("customer_name"),
-                customer_email=function_args.get("customer_email"),
-                customer_phone=function_args.get("customer_phone")
-            )
-            return result
-        except Exception as e:
-            return {
-                "success": False,
-                "message": str(e)
-            }
-
-    else:
-        return {"success": False, "message": f"Unknown function: {function_name}"}
-
 @router.get("/business/{session_id}")
 async def get_business_data(
     session_id: str,
@@ -471,8 +332,8 @@ async def get_business_data(
     This endpoint provides all business information including profile, services,
     policies, contact info, FAQs, and operational details for verification.
     """
-    # Get session from memory
-    session = demo_sessions.get(session_id)
+    # Get session from DemoSessionService
+    session = DemoSessionService.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Demo session not found or expired")
 
@@ -507,3 +368,172 @@ async def get_business_data(
         "booking_policies": business_context.get("booking_policies", {}),
         "business_info": business_context.get("business_info", "")
     }
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+async def execute_demo_function(
+    db: Session,
+    function_name: str,
+    function_args: Dict[str, Any],
+    business_id: str,
+    business_context: Dict[str, Any],
+    conversation_id: str,
+    customer_phone: str,
+    ai_service: AIService,
+    session_id: str
+) -> Dict[str, Any]:
+    """
+    Execute a function call in demo mode.
+    Uses DemoSessionService for appointments and availability.
+    """
+
+    if function_name == "book_appointment":
+        # Create appointment in session
+        appointment = {
+            "id": f"demo-{uuid.uuid4().hex[:8]}",
+            "service": function_args.get("service_type"),
+            "start_time": function_args.get("appointment_datetime"),
+            "customer_name": function_args.get("customer_name"),
+            "status": "scheduled",
+            "notes": function_args.get("notes", ""),
+            "created_at": datetime.now().isoformat()
+        }
+
+        success = DemoSessionService.add_appointment(session_id, appointment)
+
+        if success:
+            # Parse datetime for display
+            try:
+                apt_dt = datetime.fromisoformat(appointment["start_time"].replace('Z', '+00:00'))
+                display_time = apt_dt.strftime("%A, %B %d at %I:%M %p")
+            except:
+                display_time = appointment["start_time"]
+
+            return {
+                "success": True,
+                "appointment_id": appointment["id"],
+                "message": f"✅ Your {appointment['service']} appointment is booked for {display_time}",
+                "action_completed": True,
+                "demo_mode": True
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to book demo appointment"
+            }
+
+    elif function_name == "get_services":
+        return {
+            "services": list(business_context.get("service_catalog", {}).keys())
+        }
+
+    elif function_name == "get_available_slots":
+        try:
+            slots = DemoSessionService.generate_available_slots(
+                session_id=session_id,
+                start_date=function_args.get("start_date"),
+                end_date=function_args.get("end_date"),
+                duration_minutes=function_args.get("duration_minutes", 30),
+                limit=function_args.get("limit", 20)
+            )
+            return {"slots": slots, "count": len(slots)}
+        except Exception as e:
+            return {"slots": [], "count": 0, "error": str(e)}
+
+    elif function_name == "get_customer_appointments":
+        # Get appointments from session
+        appointments = DemoSessionService.get_appointments(session_id)
+
+        # Filter out cancelled appointments unless requested
+        if not function_args.get("include_past"):
+            appointments = [
+                apt for apt in appointments
+                if apt.get("status") != "cancelled"
+            ]
+
+        return {
+            "success": True,
+            "appointments": appointments,
+            "demo_mode": True
+        }
+
+    elif function_name == "cancel_appointment":
+        appointment_id = function_args.get("appointment_id")
+        success = DemoSessionService.cancel_appointment(session_id, appointment_id)
+
+        if success:
+            return {
+                "success": True,
+                "message": "✅ Your appointment has been cancelled",
+                "action_completed": True,
+                "demo_mode": True
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Appointment not found"
+            }
+
+    elif function_name == "reschedule_appointment":
+        appointment_id = function_args.get("appointment_id")
+        new_datetime = function_args.get("new_datetime")
+
+        success = DemoSessionService.reschedule_appointment(
+            session_id, appointment_id, new_datetime
+        )
+
+        if success:
+            try:
+                apt_dt = datetime.fromisoformat(new_datetime.replace('Z', '+00:00'))
+                display_time = apt_dt.strftime("%A, %B %d at %I:%M %p")
+            except:
+                display_time = new_datetime
+
+            return {
+                "success": True,
+                "message": f"✅ Your appointment has been rescheduled to {display_time}",
+                "action_completed": True,
+                "demo_mode": True
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Appointment not found"
+            }
+
+    elif function_name == "get_customer_info":
+        try:
+            result = await ai_service.get_customer_info(
+                db=db,
+                conversation_id=conversation_id
+            )
+            return result
+        except Exception as e:
+            return {
+                "success": False,
+                "customer_info": {},
+                "has_name": False,
+                "has_email": False
+            }
+
+    elif function_name == "set_customer_info":
+        try:
+            result = await ai_service.set_customer_info(
+                db=db,
+                conversation_id=conversation_id,
+                customer_name=function_args.get("customer_name"),
+                customer_email=function_args.get("customer_email"),
+                customer_phone=function_args.get("customer_phone")
+            )
+            return result
+        except Exception as e:
+            return {
+                "success": False,
+                "message": str(e)
+            }
+
+    else:
+        return {"success": False, "message": f"Unknown function: {function_name}"}
