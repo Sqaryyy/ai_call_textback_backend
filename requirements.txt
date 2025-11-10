@@ -34,7 +34,7 @@ structlog==23.2.0
 
 # External APIs
 twilio==8.10.0
-openai==1.52.0
+openai==2.7.1
 
 # Google Calendar Integration
 google-auth==2.23.4
