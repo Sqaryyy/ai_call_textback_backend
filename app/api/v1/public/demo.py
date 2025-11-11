@@ -253,6 +253,19 @@ async def send_message(
         # Refresh state
         conv_state = ConversationStateService.get_or_create_state(db, conversation_id)
 
+        import json
+
+        print("\n================ AI REQUEST PAYLOAD ================")
+        print(json.dumps({
+            "messages": formatted_messages,
+            "business_context": business_context,
+            "conversation_context": {
+                "flow_state": conv_state.flow_state,
+                "customer_info": conv_state.state_data.get("customer_info", {})
+            }
+        }, indent=2, default=str))
+        print("====================================================\n")
+
         # Get next AI response
         ai_response = ai_service.generate_response(
             messages=formatted_messages,
