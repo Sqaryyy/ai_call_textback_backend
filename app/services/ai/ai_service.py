@@ -502,7 +502,6 @@ class AIService:
                                 query=last_user_message,
                                 business_id=business_id,
                                 db=db,
-                                auto_index=True
                             )
 
                         if rag_context:
