@@ -9,7 +9,7 @@ from typing import Optional
 from uuid import UUID
 
 from app.config.database import get_db
-from app.models.api_key import APIKey
+from app.models.auth.api_key import APIKey
 from app.api.dependencies import require_api_key, require_scope
 from app.services.conversation.conversation_query_service import ConversationQueryService
 

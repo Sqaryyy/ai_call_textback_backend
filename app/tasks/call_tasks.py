@@ -6,8 +6,8 @@ from datetime import datetime, timezone, timedelta
 
 from app.config.celery_config import celery_app
 from app.config.database import get_db
-from app.models.call_event import CallEvent
-from app.models.conversation import Conversation
+from app.models.conversation.call_event import CallEvent
+from app.models.conversation.conversation import Conversation
 from app.services.business.business_service import BusinessService
 from app.services.twilio.sms_service import sms_service
 from app.services.conversation.conversation_metrics_service import ConversationMetricsService

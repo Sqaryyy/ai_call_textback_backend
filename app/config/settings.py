@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     # Server settings
     HOST: str = Field(default="0.0.0.0")
     PORT: int = Field(default=8000)
-    ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
+    ALLOWED_ORIGINS: List[str] = Field(default_factory=lambda: [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ])
 
     EMAIL_HOST: str = "smtp.gmail.com"  # or your SMTP provider
     EMAIL_PORT: int = 587

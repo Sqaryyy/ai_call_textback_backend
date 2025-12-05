@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
 from datetime import datetime, timezone
 
-from app.models.message import Message
+from app.models.conversation.message import Message
 
 logger = logging.getLogger(__name__)
 

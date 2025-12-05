@@ -4,11 +4,10 @@ Script to create a business with business hours
 Usage: python create_business.py
 """
 import sys
-import uuid
 from sqlalchemy.orm import Session
 
 from app.config.database import SessionLocal
-from app.models.business import Business, BusinessHours
+from app.models.business.business import Business, BusinessHours
 
 
 def create_business_with_hours():

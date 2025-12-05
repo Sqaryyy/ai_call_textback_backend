@@ -14,9 +14,9 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from sqlalchemy.orm import Session
-from app.config.database import SessionLocal, engine
-from app.models.user import User, UserRole
-from app.models.business import Business
+from app.config.database import SessionLocal
+from app.models.auth.user import User, UserRole
+from app.models.business.business import Business
 from app.services.user_service import UserService
 from app.services.invite_service import InviteService
 

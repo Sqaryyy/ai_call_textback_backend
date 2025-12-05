@@ -3,13 +3,12 @@ Knowledge Indexer - Background job for indexing business knowledge
 Handles bulk operations, re-indexing, and batch processing
 """
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 from sqlalchemy.orm import Session
-from datetime import datetime, timezone
 
 from app.services.ai.rag_service import RAGService
-from app.models.business import Business
-from app.models.business_knowledge import BusinessKnowledge
+from app.models.business.business import Business
+from app.models.business.business_knowledge import BusinessKnowledge
 from app.config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -314,7 +313,7 @@ class KnowledgeIndexer:
         Get documents for a specific business field (for incremental updates)
         Uses QUESTION-ONLY approach matching _prepare_documents in RAGService
         """
-        from app.models.business_knowledge import KnowledgeCategory
+        from app.models.business.business_knowledge import KnowledgeCategory
         documents = []
 
         if field_name == "service_catalog" and business.service_catalog:

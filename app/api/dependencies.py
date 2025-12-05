@@ -15,9 +15,9 @@ from uuid import UUID
 from app.config.database import get_db
 from app.config.settings import settings
 from app.services.api_key.api_key_service import APIKeyService
-from app.models.api_key import APIKey
-from app.models.user import User, PlatformRole, BusinessRole
-from app.models.refresh_token import RefreshToken
+from app.models.auth.api_key import APIKey
+from app.models.auth.user import User, BusinessRole
+from app.models.auth.refresh_token import RefreshToken
 
 from app.services.user.user_service import UserService
 

@@ -11,7 +11,7 @@ from app.services.conversation.conversation_service import ConversationService
 from app.services.conversation.conversation_state_service import ConversationStateService
 from app.services.conversation.conversation_metrics_service import ConversationMetricsService
 from app.services.message.message_service import MessageService
-from app.models.conversation_metrics import ConversationMetrics
+from app.models.conversation.conversation_metrics import ConversationMetrics
 from app.services.business.business_service import BusinessService
 from app.services.appointment.appointment_service import AppointmentService
 from app.services.ai.ai_service import AIService

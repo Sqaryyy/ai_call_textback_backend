@@ -4,7 +4,7 @@
 """Service for managing appointments"""
 from uuid import uuid4
 
-from app.models.appointment import Appointment
+from app.models.appointment.appointment import Appointment
 from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session

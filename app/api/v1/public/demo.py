@@ -6,10 +6,9 @@ File: app/api/demo.py
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 from datetime import datetime
 import uuid
-import json
 
 from app.config.database import get_db
 from app.services.conversation.conversation_service import ConversationService
@@ -18,7 +17,7 @@ from app.services.message.message_service import MessageService
 from app.services.business.business_service import BusinessService
 from app.services.ai.ai_service import AIService
 from app.services.demo.demo_session_service import DemoSessionService
-from app.models.business import Business
+from app.models.business.business import Business
 
 router = APIRouter()
 

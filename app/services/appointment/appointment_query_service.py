@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any
 from uuid import UUID
 
-from app.models.appointment import Appointment
+from app.models.appointment.appointment import Appointment
 
 
 class AppointmentService:

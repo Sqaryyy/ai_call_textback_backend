@@ -31,18 +31,7 @@ def get_db():
 
 def create_tables():
     """Drop and recreate all database tables"""
-    from app.models.business import Base  # shared Base
-    import app.models.user
-    import app.models.refresh_token
-    import app.models.api_key
-    import app.models.api_request_log
-    import app.models.email_verification
-    import app.models.invite
-    import app.models.password_reset
-    import app.models.webhook_event
-    import app.models.webhook_endpoint
-    import app.models.business_knowledge
-    import app.models
+    from app.models.business.business import Base  # shared Base
 
     print("Dropping existing tables with CASCADE...")
     with engine.connect() as conn:

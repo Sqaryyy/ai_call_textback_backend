@@ -167,7 +167,7 @@ class AIService:
         logger.info(f"📅 Fetching slots from {start_dt.isoformat()} to {end_dt.isoformat()}")
 
         try:
-            from app.models.calendar_integration import CalendarIntegration
+            from app.models.appointment.calendar_integration import CalendarIntegration
             integration = db.query(CalendarIntegration).filter_by(
                 business_id=business_id,
                 is_active=True,
@@ -224,23 +224,38 @@ class AIService:
             db: Session,
             business_id: str
     ) -> List[Dict]:
-        """Fetch list of services offered by the business with pricing and duration"""
+        """Fetch list of services offered by the business from Service table"""
         try:
-            from app.models.business import Business
-            business = db.query(Business).filter(Business.id == business_id).first()
-            if business and business.service_catalog:
-                services = []
-                for service_name, service_info in business.service_catalog.items():
-                    services.append({
-                        "name": service_name,
-                        "price": service_info.get("price", "N/A"),
-                        "duration_minutes": service_info.get("duration", 30),
-                        "description": service_info.get("description", "")
-                    })
-                return services
-            return []
+            from app.models.business.service import Service
+
+            # Query active services from the Service table
+            services_query = db.query(Service).filter(
+                Service.business_id == business_id,
+                Service.is_active == True
+            ).order_by(Service.display_order, Service.name).all()
+
+            if not services_query:
+                logger.warning(f"No services found for business {business_id}")
+                return []
+
+            # Format services for AI response
+            services = []
+            for service in services_query:
+                services.append({
+                    "name": service.name,
+                    "price": service.formatted_price,
+                    "duration_minutes": service.duration if service.duration else 30,
+                    "description": service.description or ""
+                })
+
+            logger.info(
+                f"📋 Retrieved {len(services)} services for business {business_id}: {[s['name'] for s in services]}")
+            return services
+
         except Exception as e:
             logger.error(f"Error fetching services for business {business_id}: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     async def get_customer_appointments(
@@ -252,7 +267,7 @@ class AIService:
     ) -> List[Dict]:
         """Fetch appointments for a customer by phone number"""
         try:
-            from app.models.appointment import Appointment
+            from app.models.appointment.appointment import Appointment
 
             query = db.query(Appointment).filter(
                 Appointment.customer_phone == customer_phone,
@@ -297,8 +312,8 @@ class AIService:
     ) -> Dict:
         """Cancel an appointment"""
         try:
-            from app.models.appointment import Appointment
-            from app.models.calendar_integration import CalendarIntegration
+            from app.models.appointment.appointment import Appointment
+            from app.models.appointment.calendar_integration import CalendarIntegration
 
             appointment = db.query(Appointment).filter(
                 Appointment.id == appointment_id,
@@ -372,8 +387,8 @@ class AIService:
     ) -> Dict:
         """Reschedule an appointment"""
         try:
-            from app.models.appointment import Appointment
-            from app.models.calendar_integration import CalendarIntegration
+            from app.models.appointment.appointment import Appointment
+            from app.models.appointment.calendar_integration import CalendarIntegration
 
             appointment = db.query(Appointment).filter(
                 Appointment.id == appointment_id,
@@ -492,22 +507,37 @@ class AIService:
                 try:
                     business_id = business_context.get('business_id')
                     if business_id:
-                        from app.models.business import Business
-                        business = db.query(Business).filter(Business.id == business_id).first()
+                        from app.models.business.business import Business
 
-                        if business:
-                            # Just retrieve context synchronously - don't worry about staleness check
-                            # The retrieve_context method handles the async calls internally
-                            rag_context = self.rag_service.retrieve_context_sync(
-                                query=last_user_message,
-                                business_id=business_id,
-                                db=db,
-                            )
+                        # CRITICAL: Use a separate session for RAG to avoid transaction pollution
+                        from sqlalchemy.orm import sessionmaker
+                        from app.config.database import engine
 
-                        if rag_context:
-                            logger.info(f"📚 RAG context retrieved ({len(rag_context)} chars)")
-                        else:
-                            logger.info("📚 No relevant RAG context found or skipped")
+                        SessionLocal = sessionmaker(bind=engine)
+                        rag_db = SessionLocal()
+
+                        try:
+                            business = rag_db.query(Business).filter(Business.id == business_id).first()
+
+                            if business:
+                                # Retrieve context with separate session
+                                rag_context = self.rag_service.retrieve_context_sync(
+                                    query=last_user_message,
+                                    business_id=business_id,
+                                    db=rag_db,
+                                )
+
+                            if rag_context:
+                                logger.info(f"📚 RAG context retrieved ({len(rag_context)} chars)")
+                            else:
+                                logger.info("📚 No relevant RAG context found or skipped")
+
+                        except Exception as rag_error:
+                            logger.error(f"RAG retrieval failed: {rag_error}")
+                            rag_context = ""
+                        finally:
+                            # Always close the RAG session
+                            rag_db.close()
 
                 except Exception as e:
                     logger.error(f"Error retrieving RAG context: {e}")
@@ -583,43 +613,48 @@ class AIService:
     - Current time: {current_time.strftime('%A, %B %d, %Y at %H:%M')} (UTC)
     - Conversation state: {flow_state}
 
-    USING BUSINESS INFORMATION
-    Below this prompt you can see "RELEVANT BUSINESS INFORMATION" with specific details.
-    When you see them, use exactly those details in your response. Be concrete, not vague.
+    FUNCTION CALLING BEHAVIOR:
+    - When you call a function to retrieve information, DO NOT include any message to the user
+    - Call the function silently, then respond with the actual data
+    - Never say "let me check", "one moment", "just a second", etc.
+    - The user should only see the final result, not the process
 
-    For example, if they ask about service areas and the context lists specific parts of the city,
-    name those parts. If they ask about prices and the context gives exact amounts,
-    state those amounts. Don't be generic when you have specific information available.
+    CRITICAL: When retrieving services with get_services:
+    - Call get_services WITHOUT any accompanying text
+    - After getting results, present the services naturally based on what's available
+    - If there's only ONE service, mention it directly and move to scheduling
+    - If there are MULTIPLE services, list them and ask which one they'd like
 
-    COMMUNICATION RULES
+    SERVICES:
+    - ALWAYS call get_services first when customer mentions booking
+    - NEVER assume what services exist or their prices
+    - After getting service data, present it clearly with prices
+
+    USING BUSINESS INFORMATION:
+    Below this prompt you may see "RELEVANT BUSINESS INFORMATION" with specific details.
+    Use those exact details when responding - be concrete, not vague.
+
+    COMMUNICATION RULES:
     - Keep responses short (2-3 sentences for SMS)
     - Be natural and conversational
-    - Never mention technical terms like "context", "database", "RAG"
-    - Never reveal that you're an AI
+    - Never mention technical terms like "database", "function", "system"
+    - Never reveal you're an AI
 
-    CALLING FUNCTIONS
-    Don't call functions to answer simple questions - just answer directly
-    using the business information provided below.
+    BOOKING FLOW:
+    1. Customer wants to book → call get_services (no message)
+    2. Present services naturally:
+       - One service: "I can book you for [service] at $[price]. When works for you?"
+       - Multiple services: "We offer [list with prices]. Which would you like?"
+    3. Customer chooses → call get_available_slots (no message)
+    4. Show available times
+    5. Customer picks time → call get_customer_info (no message)
+    6. If no name → ask for name, then call set_customer_info (no message)
+    7. Call book_appointment (no message), then confirm
 
-    Only call functions when you actually need to:
-    - Check calendar availability: get_available_slots
-    - Book an appointment: book_appointment
-    - Manage existing appointments: get_customer_appointments, cancel_appointment, reschedule_appointment
-    - Save/retrieve customer information: get_customer_info, set_customer_info
-    - Get list of services for booking process: get_services
-
-    BOOKING FLOW
-    1. Customer wants to book → call get_services
-    2. Customer chooses service → call get_available_slots
-    3. Show time slots with prices
-    4. Customer chooses time → first call get_customer_info
-    5. If you don't have their name, ask for it and call set_customer_info
-    6. Then call book_appointment
-
-    CUSTOMER INFORMATION
-    - Always call get_customer_info before asking for a name
-    - Always call set_customer_info immediately after they give you information
-    - Never call book_appointment without the customer's real name
+    CUSTOMER INFORMATION:
+    - Always call get_customer_info before asking for details
+    - Call set_customer_info immediately after they provide information
+    - Never book without a real customer name
 
     """
 

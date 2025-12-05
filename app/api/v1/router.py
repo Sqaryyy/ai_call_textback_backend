@@ -6,12 +6,14 @@ from fastapi import APIRouter
 
 # Existing routes
 from app.api.v1 import metrics
-from app.api.v1.dashboard import onboarding, conversations, invites as BizInvites, business, calendar
+from app.api.v1.dashboard import onboarding, conversations, invites as BizInvites, business, calendar,business_onboarding,services,documents,demo as dashboard_demo
 from app.api.v1.public import demo, auth
 from app.api.v1.admin import invites
 
 api_v1_router = APIRouter()
 
+print(f"Demo router loaded: {demo.router}")
+print(f"Demo router routes: {[route.path for route in demo.router.routes]}")
 # ============================================================================
 # PUBLIC ROUTES (No authentication required)
 # ============================================================================
@@ -42,8 +44,28 @@ api_v1_router.include_router(
     tags=["Dashboard"]
 )
 api_v1_router.include_router(
+    business_onboarding.router,
+    prefix="/dashboard/businesses",  # ← Use this for the new onboarding endpoints
+    tags=["Business Onboarding"]
+)
+api_v1_router.include_router(
+    dashboard_demo.router,
+    prefix="/dashboard/demo",  # ← Use this for the new onboarding endpoints
+    tags=["Business Demo"]
+)
+api_v1_router.include_router(
     business.router,
     prefix="/dashboard/business",
+    tags=["Dashboard"]
+)
+api_v1_router.include_router(
+    services.router,
+    prefix="/dashboard/services",
+    tags=["Dashboard"]
+)
+api_v1_router.include_router(
+    documents.router,
+    prefix="/dashboard/documents",
     tags=["Dashboard"]
 )
 api_v1_router.include_router(BizInvites.router,

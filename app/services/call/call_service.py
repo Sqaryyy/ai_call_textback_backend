@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
 
-from app.models.call_event import CallEvent
+from app.models.conversation.call_event import CallEvent
 
 
 class CallService:

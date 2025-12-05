@@ -2,8 +2,8 @@
 from datetime import datetime, timedelta, timezone
 from app.config.celery_config import celery_app
 from app.config.database import get_db
-from app.models.appointment import Appointment
-from app.models.calendar_integration import CalendarIntegration
+from app.models.appointment.appointment import Appointment
+from app.models.appointment.calendar_integration import CalendarIntegration
 from app.services.calendar.google_calendar_service import GoogleCalendarService
 from app.services.calendar.outlook_service import OutlookCalendarService
 import logging

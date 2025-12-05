@@ -9,8 +9,8 @@ from uuid import UUID
 from datetime import datetime
 
 # FIX: Changed UserRole to BusinessRole as per the user model
-from app.models.user import User, BusinessRole, user_business_association
-from app.models.business import Business
+from app.models.auth.user import User, BusinessRole, user_business_association
+from app.models.business.business import Business
 
 
 class UserService:

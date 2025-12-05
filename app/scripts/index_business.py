@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config.database import SessionLocal
 from app.services.ai.knowledge_indexer import KnowledgeIndexer
-from app.models.business import Business
+from app.models.business.business import Business
 
 
 async def index_business_knowledge(business_id: str = None):

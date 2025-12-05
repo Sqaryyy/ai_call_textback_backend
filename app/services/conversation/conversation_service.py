@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 from uuid import uuid4
 from sqlalchemy.orm import Session
-from app.models.conversation import Conversation
+from app.models.conversation.conversation import Conversation
 
 logger = logging.getLogger(__name__)
 

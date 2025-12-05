@@ -11,12 +11,12 @@ from decimal import Decimal
 import uuid
 import logging
 
-from app.database import get_db
-from app.models.service import Service
-from app.models.business import Business
+from app.config.database import get_db
+from app.models.business.service import Service
+from app.models.business.business import Business
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/services", tags=["services"])
+router = APIRouter(tags=["services"])
 
 
 # ============================================================================
@@ -81,7 +81,7 @@ class ServiceBulkCreate(BaseModel):
 
 def _service_to_response(service: Service, db: Session) -> ServiceResponse:
     """Convert Service model to ServiceResponse with computed fields"""
-    from app.models.document import Document
+    from app.models.business.document import Document
 
     # Count linked documents
     linked_docs_count = db.query(Document).filter(
@@ -321,7 +321,7 @@ def delete_service(
             raise HTTPException(status_code=404, detail="Service not found")
 
         # Check if service has linked documents
-        from app.models.document import Document
+        from app.models.business.document import Document
         linked_docs_count = db.query(Document).filter(
             Document.related_service_id == service_id,
             Document.is_active == True
@@ -367,7 +367,7 @@ def delete_service(
 @router.post("/{service_id}/reorder")
 def reorder_service(
         service_id: str,
-        new_order: int = Field(..., ge=0),
+        new_order: int,
         db: Session = Depends(get_db)
 ):
     """
@@ -409,7 +409,7 @@ def get_service_documents(
     Get all documents linked to a service
     """
     try:
-        from app.models.document import Document
+        from app.models.business.document import Document
 
         # Verify service exists
         service = db.query(Service).filter(Service.id == service_id).first()
@@ -515,4 +515,24 @@ def migrate_from_service_catalog(
     except Exception as e:
         logger.error(f"Error migrating services: {e}", exc_info=True)
         db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+@router.get("/", response_model=ServiceListResponse)
+def list_all_services(
+        db: Session = Depends(get_db)
+):
+    """
+    List all active services
+    """
+    try:
+        services = db.query(Service).filter(
+            Service.is_active == True
+        ).order_by(Service.display_order, Service.created_at).all()
+
+        return ServiceListResponse(
+            total=len(services),
+            services=[_service_to_response(s, db) for s in services]
+        )
+
+    except Exception as e:
+        logger.error(f"Error listing services: {e}")
         raise HTTPException(status_code=500, detail=str(e))

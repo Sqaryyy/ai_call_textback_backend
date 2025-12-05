@@ -1,16 +1,16 @@
 """
 Business Management Dashboard Routes
 Session-authenticated endpoints for managing business information and knowledge
+Updated for new de-bloated Business model structure
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from datetime import datetime
 import time
 import logging
 
 from app.config.database import get_db
-from app.models.user import User
-from app.models.business import Business
+from app.models.auth.user import User
+from app.models.business.business import Business
 from app.api.dependencies import get_current_user
 from app.schemas.business import (
     BusinessUpdateRequest,
@@ -25,19 +25,20 @@ from app.services.ai.rag_service import RAGService
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["dashboard-business"])
 
-# ============================================================================
-# REMOVED: rag_service = RAGService()  # Don't initialize at module level
-# ============================================================================
-
 # Fields that trigger knowledge reindexing when changed
+# Updated to reflect new model structure
 KNOWLEDGE_FIELDS = {
     "business_profile",
+    "contact_info",
+    "ai_instructions"
+}
+
+# Deprecated fields that may still exist during transition
+DEPRECATED_KNOWLEDGE_FIELDS = {
     "service_catalog",
     "conversation_policies",
     "quick_responses",
-    "services",
-    "contact_info",
-    "ai_instructions"
+    "services"
 }
 
 
@@ -78,8 +79,19 @@ def should_reindex(changed_fields: list) -> bool:
     """
     Determine if reindexing is needed based on which fields changed.
     Returns True if any knowledge-related field changed.
+
+    Note: Changes to Services and Documents trigger reindex through their
+    own endpoints. This checks only Business model fields.
     """
     return bool(set(changed_fields) & KNOWLEDGE_FIELDS)
+
+
+def check_deprecated_fields(updates: dict) -> list:
+    """
+    Check if any deprecated fields are being updated.
+    Returns list of deprecated fields found in updates.
+    """
+    return [field for field in updates.keys() if field in DEPRECATED_KNOWLEDGE_FIELDS]
 
 
 # ============================================================================
@@ -93,6 +105,12 @@ async def get_business(
 ):
     """
     Get complete business information for the current user's business.
+
+    Note: This returns core business info. Related data (services, policies, FAQs)
+    should be fetched from their respective endpoints:
+    - GET /services (for services)
+    - GET /documents (for policies, FAQs, etc.)
+
     Requires authenticated session.
     """
     if not current_user.active_business_id:
@@ -132,6 +150,9 @@ async def update_business(
     - Automatically reindexes knowledge if relevant fields changed
     - Returns updated business + reindex results
 
+    Note: To update services, policies, FAQs, or quick responses, use the
+    dedicated endpoints for those resources. Deprecated fields are ignored.
+
     Requires authenticated session.
     """
     if not current_user.active_business_id:
@@ -154,10 +175,21 @@ async def update_business(
     # Convert Pydantic model to dict, excluding None values
     update_data = updates.model_dump(exclude_none=True)
 
+    # Warn about deprecated fields but don't block the request
+    deprecated_found = check_deprecated_fields(update_data)
+    if deprecated_found:
+        logger.warning(
+            f"Deprecated fields in update attempt for business {business.id}: {deprecated_found}. "
+            f"Use dedicated endpoints for Services and Documents."
+        )
+        # Remove deprecated fields from update
+        for field in deprecated_found:
+            update_data.pop(field, None)
+
     if not update_data:
         raise HTTPException(
             status_code=400,
-            detail="No valid fields to update"
+            detail="No valid fields to update (deprecated fields ignored)"
         )
 
     # Detect what actually changed
@@ -264,7 +296,7 @@ async def reindex_knowledge(
     Manually trigger knowledge reindexing.
 
     Use this endpoint to:
-    - Force a fresh reindex of all business knowledge
+    - Force a fresh reindex of all business knowledge (profiles, documents, services)
     - Recover from failed automatic reindexing
     - Update embeddings after model changes
 
@@ -337,13 +369,6 @@ async def get_knowledge_stats(
 ):
     """
     Get statistics about indexed knowledge for your business.
-
-    Returns:
-    - Total number of knowledge chunks
-    - Breakdown by category (FAQ, services, policies, etc.)
-    - Last indexing timestamp
-
-    Requires authenticated session.
     """
     if not current_user.active_business_id:
         raise HTTPException(
@@ -362,8 +387,7 @@ async def get_knowledge_stats(
         )
 
     try:
-        # Initialize RAG service here (lazy)
-        rag_service = get_rag_service()
+        rag_service = RAGService()
 
         stats = rag_service.get_knowledge_stats(
             business_id=str(business.id),
@@ -376,12 +400,15 @@ async def get_knowledge_stats(
                 detail="Failed to retrieve knowledge statistics"
             )
 
-        # Get last indexed timestamp from most recent chunk
-        from app.models.business_knowledge import BusinessKnowledge
-        latest_chunk = db.query(BusinessKnowledge).filter(
-            BusinessKnowledge.business_id == business.id,
-            BusinessKnowledge.is_active == True
-        ).order_by(BusinessKnowledge.created_at.desc()).first()
+        # Get last indexed timestamp from most recent chunk (use new table)
+        from app.models.business.document import DocumentChunk, Document
+        latest_chunk = db.query(DocumentChunk).join(
+            Document, DocumentChunk.document_id == Document.id
+        ).filter(
+            Document.business_id == business.id,
+            Document.is_active == True,
+            DocumentChunk.is_active == True
+        ).order_by(DocumentChunk.created_at.desc()).first()
 
         last_indexed = latest_chunk.created_at if latest_chunk else None
 

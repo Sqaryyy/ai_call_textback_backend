@@ -12,9 +12,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, or_, func
 import uuid
 
-from app.models.document import Document, DocumentChunk, DocumentType, IndexingStatus
-from app.models.service import Service
-from app.models.business import Business
+from app.models.business.document import Document, DocumentChunk, DocumentType, IndexingStatus
+from app.models.business.service import Service
 from app.config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -145,11 +144,11 @@ class RAGService:
                 service_id=detected_service.id if detected_service else None,
                 document_type_filter=document_type_filter
             )
-            
+
             result = db.execute(
                 text(similarity_query),
                 {
-                    "query_embedding": str(query_embedding),
+                    "query_embedding": query_embedding,  # ✅ Pass as list, not string!
                     "business_id": business_id,
                     "service_id": str(detected_service.id) if detected_service else None,
                     "doc_type": document_type_filter.value if document_type_filter else None,
@@ -271,9 +270,9 @@ class RAGService:
         return "\n".join(parts)
 
     def _build_similarity_query(
-        self,
-        service_id: Optional[uuid.UUID] = None,
-        document_type_filter: Optional[DocumentType] = None
+            self,
+            service_id: Optional[uuid.UUID] = None,
+            document_type_filter: Optional[DocumentType] = None
     ) -> str:
         """
         Build SQL query for vector similarity search with JOINs for provenance
@@ -288,7 +287,7 @@ class RAGService:
                 d.title as document_title,
                 d.type as document_type,
                 s.name as service_name,
-                1 - (dc.embedding <=> :query_embedding) AS similarity
+                1 - (dc.embedding <=> CAST(:query_embedding AS vector)) AS similarity
             FROM document_chunks dc
             INNER JOIN documents d ON dc.document_id = d.id
             LEFT JOIN services s ON d.related_service_id = s.id
@@ -297,21 +296,21 @@ class RAGService:
                 AND d.indexing_status = 'complete'
                 AND dc.is_active = true
         """
-        
+
         # Add service scoping if detected
         if service_id:
             query += " AND (d.related_service_id = :service_id OR d.related_service_id IS NULL)"
-        
+
         # Add document type filter
         if document_type_filter:
             query += " AND d.type = :doc_type"
-        
+
         query += """
-                AND 1 - (dc.embedding <=> :query_embedding) > :threshold
-            ORDER BY dc.embedding <=> :query_embedding
+                AND 1 - (dc.embedding <=> CAST(:query_embedding AS vector)) > :threshold
+            ORDER BY dc.embedding <=> CAST(:query_embedding AS vector)
             LIMIT :limit
         """
-        
+
         return query
 
     def _keyword_fallback_search(
@@ -508,3 +507,60 @@ class RAGService:
         except Exception as e:
             logger.error(f"Error in retrieve_context_sync (thread fallback): {e}")
             return ""
+
+    def get_knowledge_stats(
+            self,
+            business_id: str,
+            db: Session
+    ) -> Dict:
+        """
+        Get statistics about indexed knowledge for a business.
+
+        Returns total chunks and breakdown by document type.
+        """
+        try:
+            from app.models.business.document import DocumentChunk, Document, DocumentType
+            from uuid import UUID
+
+            business_id_uuid = UUID(business_id) if isinstance(business_id, str) else business_id
+
+            # Get total chunks for this business
+            total_chunks = db.query(DocumentChunk).join(
+                Document, DocumentChunk.document_id == Document.id
+            ).filter(
+                Document.business_id == business_id_uuid,
+                Document.is_active == True,
+                DocumentChunk.is_active == True
+            ).count()
+
+            # Get breakdown by document type
+            category_breakdown = {}
+            for doc_type in DocumentType:
+                count = db.query(DocumentChunk).join(
+                    Document, DocumentChunk.document_id == Document.id
+                ).filter(
+                    Document.business_id == business_id_uuid,
+                    Document.type == doc_type,
+                    Document.is_active == True,
+                    DocumentChunk.is_active == True
+                ).count()
+
+                if count > 0:
+                    category_breakdown[doc_type.value] = count
+
+            logger.info(f"Knowledge stats for business {business_id}: {total_chunks} chunks")
+
+            return {
+                "success": True,
+                "total_chunks": total_chunks,
+                "category_breakdown": category_breakdown
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting knowledge stats: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "total_chunks": 0,
+                "category_breakdown": {}
+            }

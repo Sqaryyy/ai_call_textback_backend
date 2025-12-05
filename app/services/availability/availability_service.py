@@ -2,9 +2,9 @@
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from app.models.calendar_integration import CalendarIntegration
-from app.models.availability import AvailabilityRule, AvailabilityOverride
-from app.models.appointment import Appointment
+from app.models.appointment.calendar_integration import CalendarIntegration
+from app.models.appointment.availability import AvailabilityRule, AvailabilityOverride
+from app.models.appointment.appointment import Appointment
 from app.services.calendar.google_calendar_service import GoogleCalendarService
 from app.services.calendar.outlook_service import OutlookCalendarService
 from app.services.calendar.calendly_service import CalendlyService

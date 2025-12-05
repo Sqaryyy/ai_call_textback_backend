@@ -5,7 +5,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 from sqlalchemy.orm import Session
-from app.models.conversation_state import ConversationState
+from app.models.conversation.conversation_state import ConversationState
 
 
 class ConversationStateService:

@@ -10,7 +10,7 @@ from uuid import UUID
 
 from app.api.dependencies import get_db, require_platform_admin
 from app.services.invite.platform_invite_service import PlatformInviteService
-from app.models.user import User
+from app.models.auth.user import User
 from app.models.invite import Invite
 from app.config.settings import settings
 

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 from uuid import UUID
 
-from app.models.api_key import APIKey
+from app.models.auth.api_key import APIKey
 from app.models.api_request_log import APIRequestLog
 
 

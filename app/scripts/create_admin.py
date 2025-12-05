@@ -1,9 +1,8 @@
 # create_admin_existing_session.py
-import uuid
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from app.config.database import SessionLocal
-from app.models.user import User, PlatformRole
+from app.models.auth.user import User, PlatformRole
 
 # -----------------------
 # Config

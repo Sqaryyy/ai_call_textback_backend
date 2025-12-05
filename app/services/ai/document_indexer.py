@@ -1,7 +1,7 @@
-# app/services/document_indexer.py
+# app/services/document_indexer.py - CRITICAL FIX
 """
-Document Indexer Service
-Handles document ingestion, text extraction, chunking, and embedding generation.
+Document Indexer Service - FIXED VERSION
+The issue: embedding was being serialized to string instead of staying as list
 """
 import logging
 from typing import List, Dict, Optional
@@ -12,7 +12,7 @@ import uuid
 import PyPDF2
 import io
 
-from app.models.document import Document, DocumentChunk, DocumentType, IndexingStatus
+from app.models.business.document import Document, DocumentChunk, DocumentType, IndexingStatus
 from app.config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -26,16 +26,11 @@ class DocumentIndexer:
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.embedding_model = "text-embedding-3-small"
         self.embedding_dimension = 1536
-        self.chunk_size = 1000  # Characters per chunk
-        self.chunk_overlap = 200  # Overlap between chunks
+        self.chunk_size = 1000
+        self.chunk_overlap = 200
 
     async def extract_text_from_pdf(self, file_content: bytes) -> Dict:
-        """
-        Extract text from PDF file
-
-        Returns:
-            Dict with 'text' and 'metadata' (page_count, etc.)
-        """
+        """Extract text from PDF file"""
         try:
             pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
 
@@ -63,30 +58,18 @@ class DocumentIndexer:
             raise ValueError(f"Failed to extract text from PDF: {str(e)}")
 
     def chunk_text(self, text: str, metadata: Optional[Dict] = None) -> List[Dict]:
-        """
-        Split text into overlapping chunks
-
-        Args:
-            text: Text to chunk
-            metadata: Optional metadata (e.g., page info for PDFs)
-
-        Returns:
-            List of chunk dicts with 'content' and 'metadata'
-        """
+        """Split text into overlapping chunks"""
         if not text or not text.strip():
             return []
 
         chunks = []
-        start = 0
         chunk_index = 0
 
-        # For PDFs with page info, try to chunk by page first
         if metadata and 'pages' in metadata:
             for page_info in metadata['pages']:
                 page_text = page_info['text']
                 page_num = page_info['page_number']
 
-                # If page is small enough, keep it as one chunk
                 if len(page_text) <= self.chunk_size:
                     chunks.append({
                         'content': page_text,
@@ -95,7 +78,6 @@ class DocumentIndexer:
                     })
                     chunk_index += 1
                 else:
-                    # Split large pages into sub-chunks
                     page_chunks = self._split_text(page_text)
                     for sub_chunk in page_chunks:
                         chunks.append({
@@ -105,7 +87,6 @@ class DocumentIndexer:
                         })
                         chunk_index += 1
         else:
-            # Standard text chunking (for notes, FAQs, etc.)
             text_chunks = self._split_text(text)
             for idx, chunk_content in enumerate(text_chunks):
                 chunks.append({
@@ -118,10 +99,7 @@ class DocumentIndexer:
         return chunks
 
     def _split_text(self, text: str) -> List[str]:
-        """
-        Split text into chunks with overlap
-        Uses sentence boundaries when possible
-        """
+        """Split text into chunks with overlap"""
         if len(text) <= self.chunk_size:
             return [text]
 
@@ -131,9 +109,7 @@ class DocumentIndexer:
         while start < len(text):
             end = start + self.chunk_size
 
-            # If we're not at the end, try to break at sentence boundary
             if end < len(text):
-                # Look for sentence endings near the chunk boundary
                 for i in range(end, max(start + self.chunk_size - 200, start), -1):
                     if text[i] in '.!?\n':
                         end = i + 1
@@ -143,7 +119,6 @@ class DocumentIndexer:
             if chunk:
                 chunks.append(chunk)
 
-            # Move start forward with overlap
             start = end - self.chunk_overlap
 
         return chunks
@@ -155,7 +130,6 @@ class DocumentIndexer:
             if not text:
                 raise ValueError("Cannot generate embedding for empty text")
 
-            # Run sync API call in executor
             import asyncio
             loop = asyncio.get_event_loop()
 
@@ -171,11 +145,20 @@ class DocumentIndexer:
             )
 
             embedding = response.data[0].embedding
+
+            # CRITICAL: Verify it's actually a list of floats
+            if not isinstance(embedding, list):
+                logger.error(f"Embedding is not a list! Type: {type(embedding)}")
+                raise ValueError("Embedding must be a list of floats")
+
+            # CRITICAL: Ensure all elements are floats (not numpy types or strings)
+            embedding = [float(x) for x in embedding]
+
             logger.info(f"Generated embedding with dimension: {len(embedding)}")
-            return embedding
+            return embedding  # Return as Python list
 
         except asyncio.TimeoutError:
-            logger.error(f"Timeout generating embedding for: {text[:50]}...")
+            logger.error(f"Timeout generating embedding")
             raise
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
@@ -187,17 +170,7 @@ class DocumentIndexer:
             db: Session,
             file_content: Optional[bytes] = None
     ) -> Dict:
-        """
-        Index a document: extract text, chunk, generate embeddings, store chunks
-
-        Args:
-            document_id: Document to index
-            db: Database session
-            file_content: Optional file content (for PDFs)
-
-        Returns:
-            Dict with indexing results
-        """
+        """Index a document: extract text, chunk, generate embeddings, store chunks"""
         try:
             # Fetch document
             document = db.query(Document).filter(Document.id == document_id).first()
@@ -210,7 +183,7 @@ class DocumentIndexer:
 
             logger.info(f"Starting indexing for document {document_id} ({document.title})")
 
-            # Extract text based on document type
+            # Extract text
             text = document.original_content
             metadata = {}
 
@@ -219,18 +192,13 @@ class DocumentIndexer:
                 extraction_result = await self.extract_text_from_pdf(file_content)
                 text = extraction_result['text']
                 metadata = extraction_result['metadata']
-
-                # Update document content with extracted text
                 document.original_content = text
 
             if not text or not text.strip():
                 document.indexing_status = IndexingStatus.FAILED
                 document.indexing_error = "No text content found"
                 db.commit()
-                return {
-                    "success": False,
-                    "message": "No text content to index"
-                }
+                return {"success": False, "message": "No text content to index"}
 
             # Chunk the text
             logger.info("Chunking text...")
@@ -240,10 +208,7 @@ class DocumentIndexer:
                 document.indexing_status = IndexingStatus.FAILED
                 document.indexing_error = "No chunks created from text"
                 db.commit()
-                return {
-                    "success": False,
-                    "message": "No chunks created from text"
-                }
+                return {"success": False, "message": "No chunks created from text"}
 
             logger.info(f"Created {len(chunks_data)} chunks, generating embeddings...")
 
@@ -251,23 +216,42 @@ class DocumentIndexer:
             indexed_chunks = 0
             for chunk_data in chunks_data:
                 try:
+                    # Generate embedding
                     embedding = await self.generate_embedding(chunk_data['content'])
 
-                    chunk = DocumentChunk.create_chunk(
+                    # CRITICAL FIX: Double-check it's a list
+                    if not isinstance(embedding, list):
+                        logger.error(f"Embedding is not a list: {type(embedding)}")
+                        continue
+
+                    # CRITICAL FIX: Ensure all values are Python floats
+                    embedding = [float(x) for x in embedding]
+
+                    # Log type for debugging
+                    logger.debug(f"Embedding type: {type(embedding)}, first element type: {type(embedding[0])}")
+
+                    # CRITICAL FIX: Create chunk with explicit list casting
+                    chunk = DocumentChunk(
+                        id=uuid.uuid4(),
                         document_id=document.id,
                         content=chunk_data['content'],
-                        embedding=embedding,
+                        embedding=list(embedding),  # Force list conversion
                         chunk_index=chunk_data['chunk_index'],
-                        extra_metadata=chunk_data['metadata']
+                        extra_metadata=chunk_data['metadata'],
+                        is_active=True
                     )
 
                     db.add(chunk)
-                    indexed_chunks += 1
 
-                    logger.info(f"Indexed chunk {indexed_chunks}/{len(chunks_data)}")
+                    # Commit each chunk individually to catch errors immediately
+                    db.commit()
+
+                    indexed_chunks += 1
+                    logger.info(f"✓ Indexed chunk {indexed_chunks}/{len(chunks_data)}")
 
                 except Exception as e:
-                    logger.error(f"Error indexing chunk {chunk_data['chunk_index']}: {e}")
+                    logger.error(f"Error indexing chunk {chunk_data['chunk_index']}: {e}", exc_info=True)
+                    db.rollback()  # Rollback failed chunk
                     continue
 
             # Update document status
@@ -288,7 +272,6 @@ class DocumentIndexer:
         except Exception as e:
             logger.error(f"Error indexing document {document_id}: {e}", exc_info=True)
 
-            # Update document with error status
             try:
                 document = db.query(Document).filter(Document.id == document_id).first()
                 if document:
@@ -296,7 +279,7 @@ class DocumentIndexer:
                     document.indexing_error = str(e)
                     db.commit()
             except:
-                pass
+                db.rollback()
 
             return {
                 "success": False,
@@ -310,17 +293,7 @@ class DocumentIndexer:
             db: Session,
             file_content: Optional[bytes] = None
     ) -> Dict:
-        """
-        Reindex a document (delete old chunks and create new ones)
-
-        Args:
-            document_id: Document to reindex
-            db: Database session
-            file_content: Optional new file content
-
-        Returns:
-            Dict with reindexing results
-        """
+        """Reindex a document (delete old chunks and create new ones)"""
         try:
             document = db.query(Document).filter(Document.id == document_id).first()
             if not document:
@@ -369,24 +342,7 @@ class DocumentIndexer:
             file_size: Optional[int] = None,
             related_service_id: Optional[uuid.UUID] = None
     ) -> Dict:
-        """
-        Create a new document and index it in one operation
-
-        Args:
-            business_id: Business that owns the document
-            title: Document title
-            doc_type: Type of document
-            content: Text content (or will be extracted from file_content)
-            db: Database session
-            file_content: Optional file bytes (for PDFs)
-            file_path: Optional storage path
-            original_filename: Original filename
-            file_size: File size in bytes
-            related_service_id: Optional service linkage
-
-        Returns:
-            Dict with creation and indexing results
-        """
+        """Create a new document and index it in one operation"""
         try:
             # Create document record
             document = Document(
@@ -439,24 +395,7 @@ class DocumentIndexer:
             file_content: Optional[bytes] = None,
             new_title: Optional[str] = None
     ) -> Dict:
-        """
-        Create a new version of a document (1-level versioning)
-
-        Process:
-        1. Deactivate old document and its chunks
-        2. Create new document with previous_version_id pointing to old
-        3. Index new document
-
-        Args:
-            document_id: Current document ID
-            new_content: Updated content
-            db: Database session
-            file_content: Optional new file content
-            new_title: Optional new title
-
-        Returns:
-            Dict with versioning results
-        """
+        """Create a new version of a document (1-level versioning)"""
         try:
             # Get current document
             old_doc = db.query(Document).filter(Document.id == document_id).first()
@@ -480,11 +419,11 @@ class DocumentIndexer:
                 title=new_title or old_doc.title,
                 type=old_doc.type,
                 original_content=new_content,
-                file_path=old_doc.file_path,  # Keep same path if applicable
+                file_path=old_doc.file_path,
                 original_filename=old_doc.original_filename,
                 file_size=file_content and len(file_content) or old_doc.file_size,
                 related_service_id=old_doc.related_service_id,
-                previous_version_id=old_doc.id,  # Link to old version
+                previous_version_id=old_doc.id,
                 indexing_status=IndexingStatus.PENDING,
                 is_active=True
             )
@@ -523,21 +462,7 @@ class DocumentIndexer:
             document_id: uuid.UUID,
             db: Session
     ) -> Dict:
-        """
-        Revert to previous version of a document
-
-        Process:
-        1. Find previous version via previous_version_id
-        2. Deactivate current document and chunks
-        3. Reactivate previous document and chunks
-
-        Args:
-            document_id: Current document ID
-            db: Database session
-
-        Returns:
-            Dict with revert results
-        """
+        """Revert to previous version of a document"""
         try:
             # Get current document
             current_doc = db.query(Document).filter(Document.id == document_id).first()

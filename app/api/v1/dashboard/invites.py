@@ -10,9 +10,9 @@ from uuid import UUID
 
 from app.api.dependencies import get_db, require_business_owner
 from app.services.invite.business_invite_service import BusinessInviteService
-from app.models.user import User, BusinessRole
+from app.models.auth.user import User, BusinessRole
 from app.models.invite import Invite, InviteType
-from app.models.business import Business
+from app.models.business.business import Business
 from app.config.settings import settings
 
 router = APIRouter(tags=["Business - Team Invites"])
@@ -606,7 +606,7 @@ async def get_business_users(
     business = _verify_business_access(db, current_user, business_id)
 
     # Query users associated with this business through the user_business_association table
-    from app.models.user import user_business_association
+    from app.models.auth.user import user_business_association
     from sqlalchemy import select
 
     # Build the query to get users and their roles in this business

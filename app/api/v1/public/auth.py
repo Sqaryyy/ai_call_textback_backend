@@ -2,6 +2,8 @@
 # FILE: app/api/v1/auth.py
 # Public authentication endpoints - login, register, verify, password reset
 # ============================================================================
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, Field
@@ -26,10 +28,12 @@ from app.services.user.user_service import UserService
 from app.services.invite.invite_service import InviteService
 from app.services.invite.platform_invite_service import PlatformInviteService
 from app.services.invite.business_invite_service import BusinessInviteService
-from app.models.user import User, BusinessRole
+from app.models.auth.user import User, BusinessRole
 from app.models.invite import InviteType
-from app.models.email_verification import EmailVerification
-from app.models.password_reset import PasswordReset
+from app.models.auth.email_verification import EmailVerification
+from app.models.auth.password_reset import PasswordReset
+from app.models.auth.user import user_business_association
+from app.services.business.business_service import BusinessService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -183,7 +187,7 @@ async def register(
         # Handle based on invite type
         if invite.invite_type == InviteType.PLATFORM:
             # ============================================================
-            # PLATFORM INVITE: Create new business owner
+            # PLATFORM INVITE: Create new business owner with auto business
             # ============================================================
             if existing_user:
                 raise HTTPException(
@@ -191,13 +195,30 @@ async def register(
                     detail="User with this email already exists. Platform invites are for new users only."
                 )
 
-            # Create the user with platform role = USER
+            # Create the user
             user = UserService.create_user(
                 db=db,
                 email=request.email,
                 password=request.password,
                 full_name=request.full_name
             )
+
+            # AUTO-CREATE DEFAULT BUSINESS FOR NEW USER
+            default_business = BusinessService.create_default_business(db, user.id)
+
+            # Set as active business
+            user.active_business_id = default_business.id
+
+            db.flush()
+
+            # 🔑 KEY FIX: Link user to business
+            stmt = user_business_association.insert().values(
+                id=uuid.uuid4(),
+                user_id=user.id,
+                business_id=default_business.id,
+                role=BusinessRole.OWNER
+            )
+            db.execute(stmt)
 
             # Mark the platform invite as used
             PlatformInviteService.use_platform_invite(db, invite.id)
@@ -220,16 +241,16 @@ async def register(
             print(f"DEBUG: Task ID: {task.id}")
 
             return MessageResponse(
-                message="Registration successful! You can now create your first business. Please check your email to verify your account.",
+                message="Registration successful! Your business has been created. Start by updating your business information.",
                 details={
                     "email": user.email,
                     "user_id": str(user.id),
+                    "business_id": str(default_business.id),
                     "verification_required": True,
                     "invite_type": "platform",
-                    "next_step": "create_business"
+                    "next_step": "business_info"
                 }
             )
-
         else:
             # ============================================================
             # BUSINESS INVITE: Add user to business
@@ -296,7 +317,7 @@ async def register(
                 )
 
             # Get business name for response
-            from app.models.business import Business
+            from app.models.business.business import Business
             business = db.query(Business).filter(Business.id == invite.business_id).first()
 
             return MessageResponse(
@@ -707,7 +728,7 @@ async def validate_invite(
         )
     else:
         # Get business info for business invites
-        from app.models.business import Business
+        from app.models.business.business import Business
         business = db.query(Business).filter(Business.id == invite.business_id).first()
 
         return InviteValidationResponse(

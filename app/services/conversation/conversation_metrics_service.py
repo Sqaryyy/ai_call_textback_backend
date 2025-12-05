@@ -8,7 +8,7 @@ from typing import Optional, Dict, List
 from uuid import uuid4
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from app.models.conversation_metrics import ConversationMetrics
+from app.models.conversation.conversation_metrics import ConversationMetrics
 
 logger = logging.getLogger(__name__)
 

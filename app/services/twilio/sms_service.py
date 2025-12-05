@@ -7,7 +7,7 @@ from twilio.base.exceptions import TwilioException
 from sqlalchemy.orm import Session
 
 from app.config.settings import get_settings
-from app.models.message import Message
+from app.models.conversation.message import Message
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

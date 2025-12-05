@@ -10,7 +10,7 @@ from typing import Optional
 from uuid import UUID
 
 from app.config.database import get_db
-from app.models.user import User
+from app.models.auth.user import User
 from app.api.dependencies import get_current_user
 from app.services.call.call_service import CallService
 

@@ -121,32 +121,32 @@ class BusinessUpdateRequest(BaseModel):
 # ============================================================================
 
 class BusinessResponse(BaseModel):
-    """Schema for business data in responses"""
     id: UUID
-    name: str
-    phone_number: str
-    business_type: str
+    name: Optional[str] = None
+    phone_number: Optional[str] = None
+    business_type: Optional[str] = None
 
-    business_profile: Dict[str, Any]
-    service_catalog: Dict[str, Any]
-    conversation_policies: Dict[str, Any]
-    quick_responses: Dict[str, Any]
+    business_profile: Optional[Dict[str, Any]] = None
+    service_catalog: Optional[Dict[str, Any]] = None
+    conversation_policies: Optional[Dict[str, Any]] = None
+    quick_responses: Optional[Dict[str, Any]] = None
 
-    services: List[str]
-    timezone: str
-    contact_info: Dict[str, Any]
-    ai_instructions: Optional[str]
+    services: Optional[List[str]] = None
+    timezone: Optional[str] = None
+    contact_info: Optional[Dict[str, Any]] = None
+    ai_instructions: Optional[str] = None
 
-    webhook_urls: Dict[str, Any]
-    booking_settings: Dict[str, Any]
-    onboarding_status: Dict[str, Any]
+    webhook_urls: Optional[Dict[str, Any]] = None
+    booking_settings: Optional[Dict[str, Any]] = None
+    onboarding_status: Optional[Dict[str, Any]] = None
 
     created_at: datetime
     updated_at: datetime
     is_active: bool
 
     class Config:
-        from_attributes = True  # Allows creation from SQLAlchemy models
+        from_attributes = True
+
 
 
 class ReindexResult(BaseModel):

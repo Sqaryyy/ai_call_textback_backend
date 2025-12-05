@@ -1,16 +1,188 @@
 # app/services/business/business_service.py
 """Service for managing business operations"""
-from datetime import time, timezone
-from app.models.business import Business
+from datetime import timezone
+from app.models.business.business import Business
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from sqlalchemy.orm import Session
 import logging
+from uuid import UUID
 
 logger=logging.getLogger(__name__)
 
 class BusinessService:
     """Handles business-related operations"""
+
+    # Onboarding steps configuration - UPDATED TO 2 STEPS
+    ONBOARDING_STEPS = {
+        "business_info": {
+            "label": "Business Information & Hours",
+            "description": "Add your business name, type, contact info, timezone, and operating hours",
+            "order": 1
+        },
+        "calendar_connection": {
+            "label": "Connect Your Calendar",
+            "description": "Sync your calendar (Google, Outlook, Calendly, etc.) for availability",
+            "order": 2
+        }
+    }
+
+    @staticmethod
+    def create_default_business(db: Session, user_id: UUID) -> Business:
+        """
+        Create a default business for a new user during platform invite signup.
+
+        This is called automatically after user registration to ensure every user
+        starts with at least one business. Users can create additional businesses later.
+
+        Args:
+            db: Database session
+            user_id: The user who owns this business (for logging/reference)
+
+        Returns:
+            The created Business object
+        """
+        business = Business(
+            name="My Business",
+            phone_number=None,
+            business_type="",
+            timezone="UTC",
+            onboarding_status={
+                "completed_steps": [],
+                "current_step": "business_info",
+                "started_at": datetime.utcnow().isoformat(),
+                "completed_at": None
+            }
+        )
+        print(business.phone_number)
+        db.add(business)
+        db.flush()  # Get the ID without committing yet
+
+        return business
+
+    @staticmethod
+    def get_onboarding_status(db: Session, business_id: UUID) -> dict:
+        """
+        Get the current onboarding status for a business with detailed step information.
+
+        Args:
+            db: Database session
+            business_id: The business ID
+
+        Returns:
+            {
+                "completed_steps": ["business_info"],
+                "current_step": "calendar_connection",
+                "progress_percentage": 50,
+                "is_completed": False,
+                "started_at": "2024-01-15T10:30:00",
+                "completed_at": None,
+                "steps": [
+                    {
+                        "id": "business_info",
+                        "label": "Business Information & Hours",
+                        "description": "...",
+                        "order": 1,
+                        "completed": True
+                    },
+                    {
+                        "id": "calendar_connection",
+                        "label": "Connect Your Calendar",
+                        "description": "...",
+                        "order": 2,
+                        "completed": False
+                    }
+                ]
+            }
+        """
+        business = db.query(Business).filter(Business.id == business_id).first()
+
+        if not business:
+            return None
+
+        status = business.onboarding_status or {}
+        completed_steps = status.get("completed_steps", [])
+
+        # Build detailed steps list
+        steps = []
+        for step_id, step_info in BusinessService.ONBOARDING_STEPS.items():
+            steps.append({
+                "id": step_id,
+                "label": step_info["label"],
+                "description": step_info["description"],
+                "order": step_info["order"],
+                "completed": step_id in completed_steps
+            })
+
+        # Sort by order
+        steps.sort(key=lambda x: x["order"])
+
+        # Calculate progress
+        total_steps = len(BusinessService.ONBOARDING_STEPS)
+        progress_percentage = (len(completed_steps) / total_steps * 100) if total_steps > 0 else 0
+
+        return {
+            "completed_steps": completed_steps,
+            "current_step": status.get("current_step", "business_info"),
+            "progress_percentage": round(progress_percentage),
+            "is_completed": len(completed_steps) == total_steps,
+            "started_at": status.get("started_at"),
+            "completed_at": status.get("completed_at"),
+            "steps": steps
+        }
+
+    @staticmethod
+    def mark_onboarding_step_complete(
+            db: Session,
+            business_id: UUID,
+            step_id: str
+    ) -> dict:
+        """
+        Mark an onboarding step as completed and update current_step.
+        """
+        if step_id not in BusinessService.ONBOARDING_STEPS:
+            raise ValueError(f"Invalid onboarding step: {step_id}")
+
+        business = db.query(Business).filter(Business.id == business_id).first()
+
+        if not business:
+            raise ValueError(f"Business not found: {business_id}")
+
+        status = business.onboarding_status or {}
+        completed_steps = status.get("completed_steps", [])
+
+        # Add step if not already completed
+        if step_id not in completed_steps:
+            completed_steps.append(step_id)
+
+        # Find next incomplete step
+        next_step = None
+        for step_id_check, step_info in sorted(
+                BusinessService.ONBOARDING_STEPS.items(),
+                key=lambda x: x[1]["order"]
+        ):
+            if step_id_check not in completed_steps:
+                next_step = step_id_check
+                break
+
+        # Update status
+        status["completed_steps"] = completed_steps
+        status["current_step"] = next_step or "business_info"
+
+        # Mark as fully completed if all steps done
+        if next_step is None and status.get("completed_at") is None:
+            status["completed_at"] = datetime.utcnow().isoformat()
+
+        business.onboarding_status = status
+
+        # IMPORTANT: Mark the column as modified for SQLAlchemy to detect the change
+        from sqlalchemy.orm import attributes
+        attributes.flag_modified(business, "onboarding_status")
+
+        db.commit()
+        db.refresh(business)
+
+        return BusinessService.get_onboarding_status(db, business_id)
 
     @staticmethod
     def get_business_by_phone(db: Session, phone_number: str) -> Optional[Business]:
@@ -76,7 +248,7 @@ class BusinessService:
     ) -> List[str]:
         """Fetch list of services offered by the business"""
         try:
-            from app.models.business import Business
+            from app.models.business.business import Business
             business = db.query(Business).filter(Business.id == business_id).first()
             if business and business.service_catalog:
                 return list(business.service_catalog.keys())
@@ -246,7 +418,7 @@ class BusinessService:
         logger.info(f"📅 Fetching slots from {start_dt.isoformat()} to {end_dt.isoformat()}")
 
         try:
-            from app.models.calendar_integration import CalendarIntegration
+            from app.models.appointment.calendar_integration import CalendarIntegration
             integration = db.query(CalendarIntegration).filter_by(
                 business_id=business_id,
                 is_active=True,
@@ -298,4 +470,3 @@ class BusinessService:
         except Exception as e:
             logger.error(f"Error fetching available slots: {e}", exc_info=True)
             return []
-

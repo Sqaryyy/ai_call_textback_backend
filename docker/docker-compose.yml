@@ -5,6 +5,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     container_name: afterhours_postgres
+    restart: unless-stopped  # ← ADDED
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: PipiPipi1!
@@ -25,6 +26,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: afterhours_redis
+    restart: unless-stopped  # ← ADDED
     ports:
       - "6379:6379"
     volumes:
@@ -43,6 +45,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: afterhours_app
+    restart: unless-stopped  # ← ADDED
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
@@ -69,6 +72,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: afterhours_celery_conversations
+    restart: unless-stopped  # ← ADDED
     command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=conversations -n conversations@%h
     env_file:
       - ../.env
@@ -89,6 +93,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: afterhours_celery_calls
+    restart: unless-stopped  # ← ADDED
     command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=calls -n calls@%h
     env_file:
       - ../.env
@@ -109,6 +114,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: afterhours_celery_appointments
+    restart: unless-stopped  # ← ADDED
     command: celery -A app.config.celery_config.celery_app worker --loglevel=info --queues=appointments -n appointments@%h
     env_file:
       - ../.env
@@ -129,6 +135,7 @@ services:
       context: ../../frontend
       dockerfile: Dockerfile
     container_name: afterhours_frontend
+    restart: unless-stopped  # ← ADDED
     environment:
       - NODE_ENV=production
     networks:
@@ -138,6 +145,7 @@ services:
   nginx:
     image: nginx:alpine
     container_name: afterhours_nginx
+    restart: unless-stopped  # ← ADDED
     ports:
       - "80:80"
       - "443:443"

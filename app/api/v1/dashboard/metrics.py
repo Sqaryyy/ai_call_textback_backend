@@ -1,13 +1,46 @@
-# app/api/v1/metrics.py
-from fastapi import APIRouter, Depends, Query
+"""
+Dashboard Metrics Endpoints
+RESTful API for accessing business metrics and analytics in the dashboard
+Separate from the public API key based metrics endpoints
+"""
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from typing import List, Optional
+import logging
 from datetime import datetime, timezone
-from app.config.database import get_db
-from app.models.conversation.conversation_metrics import ConversationMetrics
-from app.models.auth.api_key import APIKey
-from app.api.dependencies import require_api_key, require_scope
 
-router = APIRouter(prefix="/metrics", tags=["metrics"])
+from app.config.database import get_db
+from app.models.auth.user import User
+from app.models.business.business import Business
+from app.models.conversation.conversation_metrics import ConversationMetrics
+from app.api.dependencies import get_current_user
+
+logger = logging.getLogger(__name__)
+
+# Create router for dashboard metrics
+dashboard_router = APIRouter(prefix="/dashboard/metrics", tags=["dashboard-metrics"])
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def get_business_or_404(user: User, db: Session) -> Business:
+    """Get current user's business or raise 404"""
+    if not user.active_business_id:
+        raise HTTPException(
+            status_code=403,
+            detail="User not associated with a business"
+        )
+
+    business = db.query(Business).filter(
+        Business.id == user.active_business_id
+    ).first()
+
+    if not business:
+        raise HTTPException(status_code=404, detail="Business not found")
+
+    return business
 
 
 def get_month_range(year: int = None, month: int = None):
@@ -31,31 +64,34 @@ def get_month_range(year: int = None, month: int = None):
     return start_date, end_date
 
 
-@router.get("/summary")
+# ============================================================================
+# DASHBOARD METRICS ENDPOINTS
+# ============================================================================
+
+@dashboard_router.get("/summary", response_model=dict)
 async def get_metrics_summary(
-    year: int = Query(None, description="Year (defaults to current)"),
-    month: int = Query(None, description="Month 1-12 (defaults to current)"),
-    api_key: APIKey = Depends(require_api_key),
-    _: None = Depends(require_scope("read:metrics")),
+    year: Optional[int] = Query(None, description="Year (defaults to current)"),
+    month: Optional[int] = Query(None, description="Month 1-12 (defaults to current)"),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get high-level metrics summary for your business for a specific month.
     Returns key performance indicators like total conversations, bookings, etc.
     """
-    business_id = api_key.business_id
+    business = get_business_or_404(current_user, db)
     start_date, end_date = get_month_range(year, month)
 
     # Query all metrics for this business in the time period
     metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_id,
+        ConversationMetrics.business_id == business.id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).all()
 
     if not metrics:
         return {
-            "business_id": str(business_id),
+            "business_id": str(business.id),
             "period": f"{year}-{month:02d}" if year and month else f"{datetime.now().year}-{datetime.now().month:02d}",
             "total_conversations": 0,
             "customer_responses": 0,
@@ -86,7 +122,7 @@ async def get_metrics_summary(
         conversation_durations) if conversation_durations else None
 
     return {
-        "business_id": str(business_id),
+        "business_id": str(business.id),
         "period": f"{year}-{month:02d}" if year and month else f"{datetime.now().year}-{datetime.now().month:02d}",
         "total_conversations": total_conversations,
         "customer_responses": customer_responses,
@@ -106,26 +142,25 @@ async def get_metrics_summary(
     }
 
 
-@router.get("/conversations")
+@dashboard_router.get("/conversations", response_model=dict)
 async def get_conversations(
-    year: int = Query(None),
-    month: int = Query(None),
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
-    api_key: APIKey = Depends(require_api_key),
-    _: None = Depends(require_scope("read:metrics")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get detailed conversation metrics for your business.
     Includes individual conversation details sorted by most recent.
     """
-    business_id = api_key.business_id
+    business = get_business_or_404(current_user, db)
     start_date, end_date = get_month_range(year, month)
 
     # Query and sort by most recent
     query = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_id,
+        ConversationMetrics.business_id == business.id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).order_by(ConversationMetrics.created_at.desc())
@@ -134,7 +169,7 @@ async def get_conversations(
     conversations = query.offset(skip).limit(limit).all()
 
     return {
-        "business_id": str(business_id),
+        "business_id": str(business.id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "total_conversations": total,
         "page": {
@@ -169,26 +204,25 @@ async def get_conversations(
     }
 
 
-@router.get("/bookings")
+@dashboard_router.get("/bookings", response_model=dict)
 async def get_bookings(
-    year: int = Query(None),
-    month: int = Query(None),
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
-    api_key: APIKey = Depends(require_api_key),
-    _: None = Depends(require_scope("read:metrics")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get all booked appointments for your business.
     Shows only conversations that resulted in bookings.
     """
-    business_id = api_key.business_id
+    business = get_business_or_404(current_user, db)
     start_date, end_date = get_month_range(year, month)
 
     # Query conversations with bookings
     query = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_id,
+        ConversationMetrics.business_id == business.id,
         ConversationMetrics.booking_created == True,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
@@ -198,7 +232,7 @@ async def get_bookings(
     bookings = query.offset(skip).limit(limit).all()
 
     return {
-        "business_id": str(business_id),
+        "business_id": str(business.id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "total_bookings": total,
         "page": {
@@ -226,23 +260,22 @@ async def get_bookings(
     }
 
 
-@router.get("/daily-breakdown")
+@dashboard_router.get("/daily-breakdown", response_model=dict)
 async def get_daily_breakdown(
-    year: int = Query(None),
-    month: int = Query(None),
-    api_key: APIKey = Depends(require_api_key),
-    _: None = Depends(require_scope("read:metrics")),
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get day-by-day metrics breakdown for the month.
     Shows trends over time.
     """
-    business_id = api_key.business_id
+    business = get_business_or_404(current_user, db)
     start_date, end_date = get_month_range(year, month)
 
     metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_id,
+        ConversationMetrics.business_id == business.id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).all()
@@ -282,29 +315,28 @@ async def get_daily_breakdown(
             day_data["booking_rate"] = 0.0
 
     return {
-        "business_id": str(business_id),
+        "business_id": str(business.id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "daily_breakdown": [daily_data[day] for day in sorted(daily_data.keys())]
     }
 
 
-@router.get("/funnel")
+@dashboard_router.get("/funnel", response_model=dict)
 async def get_conversion_funnel(
-    year: int = Query(None),
-    month: int = Query(None),
-    api_key: APIKey = Depends(require_api_key),
-    _: None = Depends(require_scope("read:metrics")),
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get conversion funnel visualization data.
     Shows drop-off at each stage: outreach -> response -> completed -> booking.
     """
-    business_id = api_key.business_id
+    business = get_business_or_404(current_user, db)
     start_date, end_date = get_month_range(year, month)
 
     metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_id,
+        ConversationMetrics.business_id == business.id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).all()
@@ -315,7 +347,7 @@ async def get_conversion_funnel(
     total_bookings = sum(1 for m in metrics if m.booking_created)
 
     return {
-        "business_id": str(business_id),
+        "business_id": str(business.id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "funnel": [
             {
@@ -345,23 +377,22 @@ async def get_conversion_funnel(
     }
 
 
-@router.get("/dropoff-analysis")
+@dashboard_router.get("/dropoff-analysis", response_model=dict)
 async def get_dropoff_analysis(
-    year: int = Query(None),
-    month: int = Query(None),
-    api_key: APIKey = Depends(require_api_key),
-    _: None = Depends(require_scope("read:metrics")),
+    year: Optional[int] = Query(None),
+    month: Optional[int] = Query(None),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Analyze where conversations are being dropped off.
     Shows which flow states have the highest abandonment.
     """
-    business_id = api_key.business_id
+    business = get_business_or_404(current_user, db)
     start_date, end_date = get_month_range(year, month)
 
     dropped_metrics = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_id,
+        ConversationMetrics.business_id == business.id,
         ConversationMetrics.dropped_off == True,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
@@ -388,13 +419,13 @@ async def get_dropoff_analysis(
 
     total_dropped = len(dropped_metrics)
     total_conversations = db.query(ConversationMetrics).filter(
-        ConversationMetrics.business_id == business_id,
+        ConversationMetrics.business_id == business.id,
         ConversationMetrics.created_at >= start_date,
         ConversationMetrics.created_at < end_date
     ).count()
 
     return {
-        "business_id": str(business_id),
+        "business_id": str(business.id),
         "period": f"{year}-{month:02d}" if year and month else "all-time",
         "total_dropped": total_dropped,
         "dropoff_rate": round((total_dropped / total_conversations * 100), 2) if total_conversations > 0 else 0.0,

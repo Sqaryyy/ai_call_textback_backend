@@ -6,18 +6,17 @@ Handles CRUD operations for documents and document indexing
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import uuid
 import logging
 
-from app.database import get_db
-from app.models.document import Document, DocumentType, IndexingStatus
-from app.models.service import Service
-from app.services.document_indexer import DocumentIndexer
-from app.services.rag_service import RAGService
+from app.config.database import get_db
+from app.models.business.document import Document, DocumentType
+from app.models.business.service import Service
+from app.services.ai.document_indexer import DocumentIndexer
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/documents", tags=["documents"])
+router = APIRouter(tags=["documents"])
 
 
 # ============================================================================
@@ -89,7 +88,7 @@ async def create_text_document(
         indexer = DocumentIndexer()
 
         # Validate business exists
-        from app.models.business import Business
+        from app.models.business.business import Business
         business = db.query(Business).filter(Business.id == document.business_id).first()
         if not business:
             raise HTTPException(status_code=404, detail="Business not found")
@@ -148,7 +147,7 @@ async def upload_pdf_document(
         indexer = DocumentIndexer()
 
         # Validate business exists
-        from app.models.business import Business
+        from app.models.business.business import Business
         business = db.query(Business).filter(Business.id == business_id).first()
         if not business:
             raise HTTPException(status_code=404, detail="Business not found")
@@ -409,7 +408,7 @@ def delete_document(
             document.is_active = False
 
             # Also deactivate chunks
-            from app.models.document import DocumentChunk
+            from app.models.business.document import DocumentChunk
             db.query(DocumentChunk).filter(
                 DocumentChunk.document_id == document_id
             ).update({"is_active": False})
@@ -435,7 +434,7 @@ def get_document_chunks(
     Get all chunks for a document (for debugging/inspection)
     """
     try:
-        from app.models.document import DocumentChunk
+        from app.models.business.document import DocumentChunk
 
         query = db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id)
 
@@ -452,4 +451,25 @@ def get_document_chunks(
 
     except Exception as e:
         logger.error(f"Error fetching chunks: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/", response_model=DocumentListResponse)
+def list_all_documents(
+        db: Session = Depends(get_db)
+):
+    """
+    List all active documents
+    """
+    try:
+        documents = db.query(Document).filter(
+            Document.is_active == True
+        ).order_by(Document.created_at.desc()).all()
+
+        return DocumentListResponse(
+            total=len(documents),
+            documents=[doc.to_dict() for doc in documents]
+        )
+
+    except Exception as e:
+        logger.error(f"Error listing documents: {e}")
         raise HTTPException(status_code=500, detail=str(e))
