@@ -264,6 +264,7 @@ async def send_message(
     function_call_count = 0
 
     # Handle function calls
+    # Handle function calls
     while ai_response.get("function_call"):
         function_call_count += 1
         function_name = ai_response['function_call']['name']
@@ -281,6 +282,38 @@ async def send_message(
 
         if function_name in ["get_customer_info", "set_customer_info"]:
             function_args["conversation_id"] = demo_conversation_id
+
+        if function_name in ["get_service_fields", "set_service_field", "validate_service_fields",
+                             "clear_service_context"]:
+            function_args["conversation_id"] = demo_conversation_id
+
+        # 🔧 AUTO-INJECT SERVICE_ID - Don't trust the AI
+        if function_name in ["set_service_field", "get_service_fields", "validate_service_fields"]:
+            stored_service_id = session.get("service_context", {}).get("interested_service_id")
+
+            # If we have a stored service_id, always use it
+            if stored_service_id:
+                original_id = function_args.get("service_id")
+                if original_id != stored_service_id:
+                    print(f"🔧 AUTO-INJECT: Replacing AI's service_id")
+                    print(f"   AI provided: {original_id}")
+                    print(f"   Using stored: {stored_service_id}")
+                function_args["service_id"] = stored_service_id
+            else:
+                # No stored service_id yet - this is likely the first service interaction
+                # The AI's provided ID should be valid (from get_services)
+                # Store it for future use
+                provided_id = function_args.get("service_id")
+                if provided_id:
+                    import re
+                    uuid_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    if re.match(uuid_pattern, provided_id, re.IGNORECASE):
+                        print(f"✅ First service interaction - storing service_id: {provided_id}")
+                        if "service_context" not in session:
+                            session["service_context"] = {}
+                        session["service_context"]["interested_service_id"] = provided_id
+                    else:
+                        print(f"⚠️ WARNING: AI provided invalid service_id on first interaction: {provided_id}")
 
         # Execute function
         print(f"⚙️  Executing {function_name}...")
@@ -338,6 +371,11 @@ async def send_message(
         print(f"Function Call: {ai_response.get('function_call')}")
         print(f"Finish Reason: {ai_response.get('finish_reason')}")
         print(f"{'=' * 80}\n")
+
+    print(f"🔍 DEBUG SESSION STATE:")
+    print(f"  - service_context: {session.get('service_context', {})}")
+    print(f"  - customer_info: {session.get('customer_info', {})}")
+    print(f"  - interested_service_id: {session.get('service_context', {}).get('interested_service_id')}")
 
     print(f"\n{'=' * 80}")
     print(f"✨ FINAL RESPONSE TO USER:")
@@ -548,20 +586,220 @@ async def execute_demo_function(
             "action_completed": True,
             "demo_mode": True
         }
+    elif function_name == "get_service_fields":
+        print(f"📋 Getting service fields (DEMO MODE) for {function_args.get('service_id')}...")
 
+        # Get service from database
+        from app.models.business.service import Service
+        service = db.query(Service).filter(Service.id == function_args["service_id"]).first()
+
+        if not service:
+            return {
+                "success": False,
+                "message": "Service not found"
+            }
+
+        # Get collected fields from demo session
+        service_context = session.get("service_context", {})
+        collected_fields = service_context.get("collected_fields", {})
+
+        # Get required fields from service
+        required_fields = service.required_fields or []
+
+        # Check which fields are missing
+        missing_fields = []
+        for field_def in required_fields:
+            field_name = field_def.get("field")
+            if field_def.get("required", True):
+                if not collected_fields.get(field_name):
+                    missing_fields.append(field_def)
+
+        all_collected = len(missing_fields) == 0
+
+        print(f"📋 Demo Service {service.name}: {len(collected_fields)} fields collected, {len(missing_fields)} missing")
+
+        return {
+            "success": True,
+            "collected_fields": collected_fields,
+            "missing_fields": missing_fields,
+            "all_fields_collected": all_collected,
+            "service_id": str(service.id),
+            "service_name": service.name,
+            "booking_type": service.booking_type.value,
+            "demo_mode": True
+        }
+
+
+
+    elif function_name == "set_service_field":
+
+        print(f"💾 Setting service field (DEMO MODE) {function_args.get('field_name')}...")
+
+        service_id = function_args.get("service_id")
+
+        # service_id is now guaranteed to be valid (auto-injected)
+
+        # Get or initialize service_context in session
+
+        service_context = session.get("service_context", {})
+
+        # Set the service_id if not already set
+
+        if not service_context.get("interested_service_id"):
+            service_context["interested_service_id"] = service_id
+
+            print(f"✅ Set interested_service_id to: {service_id}")
+
+        # Get or initialize collected_fields
+
+        collected_fields = service_context.get("collected_fields", {})
+
+        # Store the field value
+
+        field_name = function_args["field_name"]
+
+        field_value = function_args["field_value"]
+
+        collected_fields[field_name] = field_value
+
+        service_context["collected_fields"] = collected_fields
+
+        # Save back to session
+
+        session["service_context"] = service_context
+
+        print(f"✅ Stored field '{field_name}' = '{field_value}' (DEMO)")
+
+        print(f"📊 Current collected_fields: {collected_fields}")
+
+        return {
+
+            "success": True,
+
+            "message": f"Stored {field_name}",
+
+            "collected_fields": collected_fields,
+
+            "demo_mode": True
+
+        }
+
+
+
+    elif function_name == "validate_service_fields":
+
+        print(f"✅ Validating service fields (DEMO MODE) for {function_args.get('service_id')}...")
+
+        # Get service
+
+        from app.models.business.service import Service
+
+        service = db.query(Service).filter(Service.id == function_args["service_id"]).first()
+
+        if not service:
+            return {
+
+                "valid": False,
+
+                "message": "Service not found",
+
+                "missing_fields": [],
+
+                "demo_mode": True
+
+            }
+
+        # Get collected fields from demo session
+
+        service_context = session.get("service_context", {})
+
+        collected_fields = service_context.get("collected_fields", {})
+
+        # Also include customer info
+
+        customer_info = session.get("customer_info", {})
+
+        all_collected_data = {
+
+            "name": customer_info.get("name"),
+
+            "email": customer_info.get("email"),
+
+            "phone": customer_info.get("phone"),
+
+            **collected_fields
+
+        }
+
+        # Use the service's validate method
+
+        is_valid, missing_fields = service.validate_required_fields(all_collected_data)
+
+        if is_valid:
+
+            print(f"✅ All required fields collected for {service.name} (DEMO)")
+
+            return {
+
+                "valid": True,
+
+                "message": "All required fields collected",
+
+                "missing_fields": [],
+
+                "can_proceed": True,
+
+                "demo_mode": True
+
+            }
+
+        else:
+
+            missing_field_names = [f.get("label", f.get("field")) for f in missing_fields]
+
+            print(f"⚠️ Missing fields for {service.name}: {missing_field_names} (DEMO)")
+
+            return {
+
+                "valid": False,
+
+                "message": f"Still need: {', '.join(missing_field_names)}",
+
+                "missing_fields": missing_fields,
+
+                "can_proceed": False,
+
+                "demo_mode": True
+
+            }
+
+    elif function_name == "clear_service_context":
+        print(f"🧹 Clearing service context...")
+        # Clear service-specific data from session while keeping customer info
+        service_data = session.get("service_context", {})
+        session["service_context"] = {}
+
+        return {
+            "success": True,
+            "message": "Service context cleared",
+            "demo_mode": True
+        }
     elif function_name == "get_services":
         services = await ai_service.get_services(
             db=db,
             business_id=business_id
         )
-        # Return service names for the AI
+        # Return service data INCLUDING the id
         return {
             "services": [
                 {
+                    "id": s["id"],  # ✅ ADD THIS
                     "name": s["name"],
                     "price": s["price"],
                     "duration_minutes": s["duration_minutes"],
-                    "description": s.get("description", "")
+                    "description": s.get("description", ""),
+                    "booking_type": s.get("booking_type", "direct"),  # ✅ ADD THIS TOO
+                    "required_fields": s.get("required_fields", [])  # ✅ AND THIS
                 }
                 for s in services
             ]

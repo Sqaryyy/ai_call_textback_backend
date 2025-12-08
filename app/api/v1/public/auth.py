@@ -1,10 +1,11 @@
 # ============================================================================
 # FILE: app/api/v1/auth.py
 # Public authentication endpoints - login, register, verify, password reset
+# MODIFIED: Now uses httpOnly cookies instead of returning tokens in response
 # ============================================================================
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
@@ -37,6 +38,62 @@ from app.services.business.business_service import BusinessService
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+# ============================================================================
+# Cookie Configuration
+# ============================================================================
+COOKIE_CONFIG = {
+    "httponly": True,  # Prevent JavaScript access
+    "secure": True,  # Only send over HTTPS (set to False in development)
+    "samesite": "lax",  # CSRF protection
+    "max_age": 60 * 60 * 24 * 30,  # 30 days for refresh token
+}
+
+ACCESS_TOKEN_COOKIE = "access_token"
+REFRESH_TOKEN_COOKIE = "refresh_token"
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    """Set authentication cookies on the response."""
+    # Access token - shorter expiry (15 minutes)
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=access_token,
+        httponly=True,
+        secure=COOKIE_CONFIG["secure"],
+        samesite=COOKIE_CONFIG["samesite"],
+        max_age=60 * 15,  # 15 minutes
+    )
+
+    # Refresh token - longer expiry (30 days)
+    response.set_cookie(
+        key=REFRESH_TOKEN_COOKIE,
+        value=refresh_token,
+        httponly=True,
+        secure=COOKIE_CONFIG["secure"],
+        samesite=COOKIE_CONFIG["samesite"],
+        max_age=COOKIE_CONFIG["max_age"],
+    )
+
+
+def clear_auth_cookies(response: Response):
+    """Clear authentication cookies."""
+    response.delete_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        httponly=True,
+        secure=COOKIE_CONFIG["secure"],
+        samesite=COOKIE_CONFIG["samesite"],
+    )
+    response.delete_cookie(
+        key=REFRESH_TOKEN_COOKIE,
+        httponly=True,
+        secure=COOKIE_CONFIG["secure"],
+        samesite=COOKIE_CONFIG["samesite"],
+    )
+
 
 # ============================================================================
 # Pydantic Schemas
@@ -49,60 +106,20 @@ class RegisterRequest(BaseModel):
     full_name: Optional[str] = None
     invite_token: str = Field(..., description="Invite token required for registration")
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "email": "user@example.com",
-                "password": "SecurePass123!",
-                "full_name": "John Doe",
-                "invite_token": "abc123xyz789"
-            }
-        }
-
 
 class LoginRequest(BaseModel):
     """Request body for login."""
     email: EmailStr
     password: str
 
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "email": "user@example.com",
-                "password": "SecurePass123!"
-            }
-        }
-
 
 class TokenResponse(BaseModel):
-    """Response with access and refresh tokens."""
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
+    """Response after successful authentication - NO TOKENS in body anymore."""
     user_id: str
     email: str
     full_name: Optional[str] = None
     active_business_id: Optional[str] = None
     is_verified: bool = False
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-                "refresh_token": "def456ghi789jkl012mno345pqr678stu901vwx234...",
-                "token_type": "bearer",
-                "user_id": "550e8400-e29b-41d4-a716-446655440000",
-                "email": "user@example.com",
-                "full_name": "John Doe",
-                "active_business_id": "660e8400-e29b-41d4-a716-446655440001",
-                "is_verified": True
-            }
-        }
-
-
-class RefreshTokenRequest(BaseModel):
-    """Request body for refreshing access token."""
-    refresh_token: str
 
 
 class VerifyEmailRequest(BaseModel):
@@ -149,17 +166,12 @@ class InviteValidationResponse(BaseModel):
 @router.post("/register", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
 async def register(
         request: RegisterRequest,
+        response: Response,
         db: Session = Depends(get_db)
 ):
     """
     Register a new user with an invite token.
-
-    Supports two types of invites:
-    - Platform invites: Creates a new business owner (no business assignment yet)
-    - Business invites: Adds user to a specific business as owner/member
-
-    The user will receive an email verification link and must verify their email
-    before they can fully access the system.
+    Sets httpOnly cookies for authentication.
     """
     # Validate the invite token (auto-detects type)
     is_valid, error_msg, invite = InviteService.validate_invite(
@@ -186,9 +198,6 @@ async def register(
 
         # Handle based on invite type
         if invite.invite_type == InviteType.PLATFORM:
-            # ============================================================
-            # PLATFORM INVITE: Create new business owner with auto business
-            # ============================================================
             if existing_user:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -205,13 +214,10 @@ async def register(
 
             # AUTO-CREATE DEFAULT BUSINESS FOR NEW USER
             default_business = BusinessService.create_default_business(db, user.id)
-
-            # Set as active business
             user.active_business_id = default_business.id
-
             db.flush()
 
-            # 🔑 KEY FIX: Link user to business
+            # Link user to business
             stmt = user_business_association.insert().values(
                 id=uuid.uuid4(),
                 user_id=user.id,
@@ -229,19 +235,22 @@ async def register(
             db.commit()
             db.refresh(verification)
 
-            print(f"DEBUG: About to send email to {user.email} with token {verification.token}")
-
             # Send verification email via Celery
-            task = send_verification_email.delay(
+            send_verification_email.delay(
                 email=user.email,
                 token=verification.token,
                 user_name=user.full_name
             )
 
-            print(f"DEBUG: Task ID: {task.id}")
+            # Generate tokens and set cookies
+            access_token = create_access_token(
+                data={"sub": str(user.id), "email": user.email}
+            )
+            refresh_token_obj = create_refresh_token(db, user.id)
+            set_auth_cookies(response, access_token, refresh_token_obj.token)
 
             return MessageResponse(
-                message="Registration successful! Your business has been created. Start by updating your business information.",
+                message="Registration successful! Your business has been created.",
                 details={
                     "email": user.email,
                     "user_id": str(user.id),
@@ -252,16 +261,13 @@ async def register(
                 }
             )
         else:
-            # ============================================================
-            # BUSINESS INVITE: Add user to business
-            # ============================================================
+            # BUSINESS INVITE logic (same as before, but with cookies)
             if not invite.business_id:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Business invite is missing business_id"
                 )
 
-            # If user doesn't exist, create them
             if not existing_user:
                 user = UserService.create_user(
                     db=db,
@@ -270,7 +276,6 @@ async def register(
                     full_name=request.full_name
                 )
             else:
-                # User exists, check if they already belong to this business
                 existing_role = UserService.get_user_role_in_business(
                     db=db,
                     user_id=existing_user.id,
@@ -282,10 +287,8 @@ async def register(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="User is already a member of this business"
                     )
-
                 user = existing_user
 
-            # Add user to the business from the invite
             role_map = {
                 "owner": BusinessRole.OWNER,
                 "member": BusinessRole.MEMBER
@@ -299,29 +302,32 @@ async def register(
                 role=business_role
             )
 
-            # Mark the business invite as used
             BusinessInviteService.use_business_invite(db, invite.id)
 
-            # Only create verification for new users
             if not existing_user:
                 verification = EmailVerification.create_for_user(user.id, expiry_hours=24)
                 db.add(verification)
                 db.commit()
                 db.refresh(verification)
 
-                # Send verification email via Celery
                 send_verification_email.delay(
                     email=user.email,
                     token=verification.token,
                     user_name=user.full_name
                 )
 
-            # Get business name for response
+            # Generate tokens and set cookies
+            access_token = create_access_token(
+                data={"sub": str(user.id), "email": user.email}
+            )
+            refresh_token_obj = create_refresh_token(db, user.id)
+            set_auth_cookies(response, access_token, refresh_token_obj.token)
+
             from app.models.business.business import Business
             business = db.query(Business).filter(Business.id == invite.business_id).first()
 
             return MessageResponse(
-                message=f"Registration successful! You've been added to {business.name if business else 'the business'}. Please check your email to verify your account." if not existing_user else f"Successfully joined {business.name if business else 'the business'}!",
+                message=f"Registration successful! You've been added to {business.name if business else 'the business'}.",
                 details={
                     "email": user.email,
                     "user_id": str(user.id),
@@ -352,13 +358,12 @@ async def register(
 @router.post("/login", response_model=TokenResponse)
 async def login(
         request: LoginRequest,
+        response: Response,
         db: Session = Depends(get_db)
 ):
     """
     Login with email and password.
-
-    Returns access and refresh tokens. Users can login even without email verification,
-    but some features may be restricted until verification is complete.
+    Sets httpOnly cookies for authentication.
     """
     user = UserService.authenticate_user(
         db=db,
@@ -377,12 +382,12 @@ async def login(
     access_token = create_access_token(
         data={"sub": str(user.id), "email": user.email}
     )
-
     refresh_token_obj = create_refresh_token(db, user.id)
 
+    # Set cookies
+    set_auth_cookies(response, access_token, refresh_token_obj.token)
+
     return TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token_obj.token,
         user_id=str(user.id),
         email=user.email,
         full_name=user.full_name,
@@ -393,17 +398,25 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_access_token(
-        request: RefreshTokenRequest,
+        request: Request,
+        response: Response,
         db: Session = Depends(get_db)
 ):
     """
-    Refresh an access token using a refresh token.
-
-    The refresh token must be valid and not revoked. Returns a new access token
-    and the same refresh token (refresh tokens are long-lived).
+    Refresh an access token using the refresh token from cookies.
     """
+    # Get refresh token from cookie
+    refresh_token_value = request.cookies.get(REFRESH_TOKEN_COOKIE)
+
+    if not refresh_token_value:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Verify refresh token
-    refresh_token = verify_refresh_token(db, request.refresh_token)
+    refresh_token = verify_refresh_token(db, refresh_token_value)
 
     if not refresh_token:
         raise HTTPException(
@@ -431,9 +444,17 @@ async def refresh_access_token(
         data={"sub": str(user.id), "email": user.email}
     )
 
+    # Update only the access token cookie
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=access_token,
+        httponly=True,
+        secure=COOKIE_CONFIG["secure"],
+        samesite=COOKIE_CONFIG["samesite"],
+        max_age=60 * 15,  # 15 minutes
+    )
+
     return TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token.token,
         user_id=str(user.id),
         email=user.email,
         full_name=user.full_name,
@@ -444,23 +465,22 @@ async def refresh_access_token(
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(
-        request: RefreshTokenRequest,
+        request: Request,
+        response: Response,
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user)
 ):
     """
-    Logout by revoking the refresh token.
-
-    This invalidates the refresh token, preventing new access tokens from being generated.
-    The current access token will still work until it expires.
+    Logout by revoking the refresh token and clearing cookies.
     """
-    success = revoke_refresh_token(db, request.refresh_token)
+    # Get refresh token from cookie
+    refresh_token_value = request.cookies.get(REFRESH_TOKEN_COOKIE)
 
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Refresh token not found"
-        )
+    if refresh_token_value:
+        revoke_refresh_token(db, refresh_token_value)
+
+    # Clear cookies
+    clear_auth_cookies(response)
 
     return MessageResponse(
         message="Successfully logged out"
@@ -469,15 +489,17 @@ async def logout(
 
 @router.post("/logout-all", response_model=MessageResponse)
 async def logout_all_devices(
+        response: Response,
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_active_user)
 ):
     """
-    Logout from all devices by revoking all refresh tokens for the user.
-
-    This is useful for security purposes if you suspect your account has been compromised.
+    Logout from all devices by revoking all refresh tokens.
     """
     count = revoke_all_user_tokens(db, current_user.id)
+
+    # Clear cookies
+    clear_auth_cookies(response)
 
     return MessageResponse(
         message=f"Successfully logged out from all devices",
@@ -486,7 +508,7 @@ async def logout_all_devices(
 
 
 # ============================================================================
-# Email Verification Endpoints
+# Email Verification, Password Reset, etc. (unchanged)
 # ============================================================================
 
 @router.post("/verify-email", response_model=MessageResponse)
@@ -494,10 +516,7 @@ async def verify_email(
         request: VerifyEmailRequest,
         db: Session = Depends(get_db)
 ):
-    """
-    Verify user's email address using the verification token sent via email.
-    """
-    # Find verification token
+    """Verify user's email address using the verification token sent via email."""
     verification = db.query(EmailVerification).filter(
         EmailVerification.token == request.token
     ).first()
@@ -514,17 +533,13 @@ async def verify_email(
             detail="Verification token has expired or already been used"
         )
 
-    # Mark as verified
     verification.mark_as_used()
-
-    # Update user
     user = verification.user
     user.is_verified = True
-
     db.commit()
 
     return MessageResponse(
-        message="Email verified successfully! You can now access all features.",
+        message="Email verified successfully!",
         details={
             "email": user.email,
             "verified_at": verification.verified_at.isoformat()
@@ -537,30 +552,23 @@ async def resend_verification_email(
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user)
 ):
-    """
-    Resend email verification link to the current user.
-
-    Can only be used if the user is not already verified.
-    """
+    """Resend email verification link."""
     if current_user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email is already verified"
         )
 
-    # Invalidate any existing verification tokens
     db.query(EmailVerification).filter(
         EmailVerification.user_id == current_user.id,
         EmailVerification.is_used == False
     ).update({"is_used": True})
 
-    # Create new verification token
     verification = EmailVerification.create_for_user(current_user.id, expiry_hours=24)
     db.add(verification)
     db.commit()
     db.refresh(verification)
 
-    # Send verification email via Celery
     send_verification_email.delay(
         email=current_user.email,
         token=verification.token,
@@ -568,50 +576,36 @@ async def resend_verification_email(
     )
 
     return MessageResponse(
-        message="Verification email sent! Please check your inbox.",
+        message="Verification email sent!",
         details={"email": current_user.email}
     )
 
-
-# ============================================================================
-# Password Reset Endpoints
-# ============================================================================
 
 @router.post("/forgot-password", response_model=MessageResponse)
 async def forgot_password(
         request: ForgotPasswordRequest,
         db: Session = Depends(get_db)
 ):
-    """
-    Request a password reset link.
-
-    Sends an email with a password reset token. Always returns success
-    to prevent email enumeration attacks.
-    """
-    # Find user (but don't reveal if they exist)
+    """Request a password reset link."""
     user = UserService.get_user_by_email(db, request.email)
 
     if user and user.is_active:
-        # Invalidate any existing password reset tokens
         db.query(PasswordReset).filter(
             PasswordReset.user_id == user.id,
             PasswordReset.is_used == False
         ).update({"is_used": True})
 
-        # Create password reset token (1 hour expiry for security)
         reset_token = PasswordReset.create_for_user(user.id, expiry_hours=1)
         db.add(reset_token)
         db.commit()
         db.refresh(reset_token)
 
-        # Send password reset email via Celery
         send_password_reset_email.delay(
             email=user.email,
             token=reset_token.token,
             user_name=user.full_name
         )
 
-    # Always return success to prevent email enumeration
     return MessageResponse(
         message="If an account exists with that email, a password reset link has been sent."
     )
@@ -622,10 +616,7 @@ async def reset_password(
         request: ResetPasswordRequest,
         db: Session = Depends(get_db)
 ):
-    """
-    Reset password using the token sent via email.
-    """
-    # Find reset token
+    """Reset password using the token sent via email."""
     reset_token = db.query(PasswordReset).filter(
         PasswordReset.token == request.token
     ).first()
@@ -642,20 +633,14 @@ async def reset_password(
             detail="Reset token has expired or already been used"
         )
 
-    # Update password
     user = reset_token.user
     user.hashed_password = User.hash_password(request.new_password)
-
-    # Mark token as used
     reset_token.mark_as_used()
-
-    # Revoke all refresh tokens for security
     revoke_all_user_tokens(db, user.id)
-
     db.commit()
 
     return MessageResponse(
-        message="Password reset successful! Please login with your new password.",
+        message="Password reset successful!",
         details={"email": user.email}
     )
 
@@ -666,11 +651,7 @@ async def change_password(
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_active_user)
 ):
-    """
-    Change password for the currently logged-in user.
-
-    Requires the old password for verification.
-    """
+    """Change password for the currently logged-in user."""
     success = UserService.change_password(
         db=db,
         user_id=current_user.id,
@@ -684,18 +665,12 @@ async def change_password(
             detail="Incorrect old password"
         )
 
-    # Revoke all refresh tokens except current session for security
-    # (User will need to re-login on other devices)
     revoke_all_user_tokens(db, current_user.id)
 
     return MessageResponse(
-        message="Password changed successfully! Please login again on other devices."
+        message="Password changed successfully!"
     )
 
-
-# ============================================================================
-# Utility Endpoints
-# ============================================================================
 
 @router.get("/validate-invite", response_model=InviteValidationResponse)
 async def validate_invite(
@@ -703,12 +678,7 @@ async def validate_invite(
         email: Optional[str] = None,
         db: Session = Depends(get_db)
 ):
-    """
-    Validate an invite token before registration.
-
-    This endpoint can be used by the frontend to check if an invite is valid
-    and show appropriate information to the user.
-    """
+    """Validate an invite token before registration."""
     is_valid, error_msg, invite = InviteService.validate_invite(db, token, email)
 
     if not is_valid or not invite:
@@ -717,23 +687,21 @@ async def validate_invite(
             message=error_msg or "Invalid invite"
         )
 
-    # Handle based on invite type
     if invite.invite_type == InviteType.PLATFORM:
         return InviteValidationResponse(
             valid=True,
-            message="Valid platform invite - you'll be able to create your own business",
+            message="Valid platform invite",
             invite_type="platform",
             business_name=None,
             role="owner"
         )
     else:
-        # Get business info for business invites
         from app.models.business.business import Business
         business = db.query(Business).filter(Business.id == invite.business_id).first()
 
         return InviteValidationResponse(
             valid=True,
-            message=f"Valid business invite - you'll join {business.name if business else 'a business'}",
+            message=f"Valid business invite",
             invite_type="business",
             business_name=business.name if business else None,
             role=invite.role
@@ -745,14 +713,8 @@ async def get_current_user_info(
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user)
 ):
-    """
-    Get current user information from the JWT token.
-
-    Useful for the frontend to check authentication status and get user details.
-    """
+    """Get current user information."""
     return TokenResponse(
-        access_token="",  # Don't send token back
-        refresh_token="",  # Don't send token back
         user_id=str(current_user.id),
         email=current_user.email,
         full_name=current_user.full_name,

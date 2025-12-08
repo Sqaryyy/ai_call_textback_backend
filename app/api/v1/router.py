@@ -6,8 +6,8 @@ from fastapi import APIRouter
 
 # Existing routes
 from app.api.v1 import metrics
-from app.api.v1.dashboard import onboarding, conversations, invites as BizInvites, business, calendar,business_onboarding,services,documents,demo as dashboard_demo
-from app.api.v1.public import demo, auth
+from app.api.v1.dashboard import onboarding, api_key, conversations, invites as BizInvites, business, calendar,business_onboarding,services,documents,demo as dashboard_demo,webhook
+from app.api.v1.public import demo2 as demo, auth
 from app.api.v1.admin import invites
 
 api_v1_router = APIRouter()
@@ -37,7 +37,16 @@ api_v1_router.include_router(
     prefix="/dashboard",  # ← Just /dashboard
     tags=["Dashboard"]
 )
-
+api_v1_router.include_router(
+    api_key.router,
+    prefix="/dashboard/api-keys",  # ← Just /dashboard
+    tags=["Dashboard"]
+)
+api_v1_router.include_router(
+    webhook.router,
+    prefix="/dashboard/webhooks",  # ← Just /dashboard
+    tags=["Dashboard"]
+)
 api_v1_router.include_router(
     onboarding.router,
     prefix="/dashboard/onboarding",

@@ -1,6 +1,7 @@
 # ============================================================================
 # FILE: app/api/dependencies.py
 # Authentication dependencies for API keys and JWT tokens
+# MODIFIED: Now reads JWT from httpOnly cookies instead of Authorization header
 # ============================================================================
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -31,10 +32,11 @@ api_key_security = HTTPBearer(
     description="Enter your API key in the format: mctb_live_xxxxx or mctb_test_xxxxx"
 )
 
-# JWT security for user authentication
+# JWT security for user authentication (kept for API documentation)
 jwt_security = HTTPBearer(
     scheme_name="JWT Bearer Token",
-    description="Enter your JWT access token"
+    description="Enter your JWT access token",
+    auto_error=False  # Don't auto-error since we read from cookies now
 )
 
 
@@ -217,15 +219,16 @@ def revoke_all_user_tokens(db: Session, user_id: UUID) -> int:
 
 
 # ============================================================================
-# JWT Authentication Dependencies
+# JWT Authentication Dependencies - COOKIE-BASED
 # ============================================================================
 
 async def get_current_user(
-        credentials: HTTPAuthorizationCredentials = Depends(jwt_security),
+        request: Request,
         db: Session = Depends(get_db)
 ) -> User:
     """
     Dependency to get the current authenticated user from JWT access token.
+    NOW READS FROM COOKIE instead of Authorization header.
 
     Usage in routes:
         @router.get("/profile")
@@ -235,7 +238,15 @@ async def get_current_user(
     Raises:
         HTTPException 401: If token is invalid or user not found
     """
-    token = credentials.credentials
+    # Read access token from cookie
+    token = request.cookies.get("access_token")
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated - no access token found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     # Verify and decode token
     payload = verify_access_token(token)
@@ -294,22 +305,23 @@ async def get_current_active_user(
 
 
 async def optional_current_user(
-        credentials: Optional[HTTPAuthorizationCredentials] = Depends(
-            HTTPBearer(auto_error=False)
-        ),
+        request: Request,
         db: Session = Depends(get_db)
 ) -> Optional[User]:
     """
     Optional JWT authentication dependency.
     Returns User if valid token provided, None otherwise.
+    NOW READS FROM COOKIE.
 
     Useful for endpoints that work differently with/without auth.
     """
-    if not credentials:
+    # Try to get token from cookie
+    token = request.cookies.get("access_token")
+
+    if not token:
         return None
 
     try:
-        token = credentials.credentials
         payload = verify_access_token(token)
         user_id_str = payload.get("sub")
 
@@ -324,7 +336,7 @@ async def optional_current_user(
 
 
 # ============================================================================
-# Platform-Level Role Dependencies (NEW)
+# Platform-Level Role Dependencies
 # ============================================================================
 
 async def require_platform_admin(
@@ -350,7 +362,7 @@ async def require_platform_admin(
 
 
 # ============================================================================
-# Business-Level Role Dependencies (UPDATED)
+# Business-Level Role Dependencies
 # ============================================================================
 
 async def require_business_owner(
@@ -401,6 +413,7 @@ def require_business_owner_for_business(business_id: UUID):
         ):
             pass
     """
+
     async def _check_owner(
             current_user: User = Depends(get_current_active_user),
             db: Session = Depends(get_db)

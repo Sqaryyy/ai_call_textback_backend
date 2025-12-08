@@ -5,14 +5,15 @@ Handles CRUD operations for business services
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from decimal import Decimal
+from enum import Enum
 import uuid
 import logging
 
 from app.config.database import get_db
-from app.models.business.service import Service
+from app.models.business.service import Service, BookingType
 from app.models.business.business import Business
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,22 @@ router = APIRouter(tags=["services"])
 # Request/Response Models
 # ============================================================================
 
+class BookingTypeEnum(str, Enum):
+    """Pydantic enum for booking types"""
+    DIRECT = "direct"
+    CONSULTATION_REQUIRED = "consultation_required"
+    LEAD_ONLY = "lead_only"
+
+
+class RequiredFieldSchema(BaseModel):
+    """Schema for required field definition"""
+    field: str = Field(..., description="Field name (e.g., 'budget', 'timeline')")
+    label: Optional[str] = Field(None, description="Display label for the field")
+    type: str = Field(default="text", description="Field type: text, select, multiselect, number, date")
+    required: bool = Field(default=True, description="Whether this field is required")
+    options: Optional[List[str]] = Field(None, description="Options for select/multiselect types")
+
+
 class ServiceCreate(BaseModel):
     """Request model for creating a service"""
     business_id: str
@@ -30,7 +47,16 @@ class ServiceCreate(BaseModel):
     description: Optional[str] = None
     price: Optional[float] = Field(None, ge=0)
     price_display: Optional[str] = Field(None, max_length=50)
-    duration: Optional[int] = Field(None, ge=0, description="Duration in minutes")
+    duration: Optional[int] = Field(None, ge=0,
+                                    description="Duration in minutes (optional if consultation_required or lead_only)")
+
+    # New booking fields
+    booking_type: BookingTypeEnum = Field(default=BookingTypeEnum.DIRECT)
+    consultation_duration: Optional[int] = Field(None, ge=5, description="Discovery call duration in minutes")
+    consultation_price: Optional[float] = Field(None, ge=0, description="Discovery call price (usually 0)")
+    required_fields: List[RequiredFieldSchema] = Field(default_factory=list,
+                                                       description="Fields that must be collected")
+
     display_order: int = Field(default=0)
 
 
@@ -41,6 +67,13 @@ class ServiceUpdate(BaseModel):
     price: Optional[float] = Field(None, ge=0)
     price_display: Optional[str] = Field(None, max_length=50)
     duration: Optional[int] = Field(None, ge=0)
+
+    # New booking fields
+    booking_type: Optional[BookingTypeEnum] = None
+    consultation_duration: Optional[int] = Field(None, ge=5)
+    consultation_price: Optional[float] = Field(None, ge=0)
+    required_fields: Optional[List[RequiredFieldSchema]] = None
+
     display_order: Optional[int] = None
     is_active: Optional[bool] = None
 
@@ -56,6 +89,14 @@ class ServiceResponse(BaseModel):
     formatted_price: str
     duration: Optional[int]
     formatted_duration: str
+
+    # New booking fields
+    booking_type: str
+    consultation_duration: Optional[int]
+    consultation_price: Optional[float]
+    formatted_consultation_duration: Optional[str]
+    required_fields: List[Dict[str, Any]]
+
     is_active: bool
     display_order: int
     created_at: str
@@ -92,6 +133,7 @@ def _service_to_response(service: Service, db: Session) -> ServiceResponse:
     data = service.to_dict()
     data["formatted_price"] = service.formatted_price
     data["formatted_duration"] = service.formatted_duration
+    data["formatted_consultation_duration"] = service.formatted_consultation_duration
     data["linked_documents_count"] = linked_docs_count
 
     return ServiceResponse(**data)
@@ -117,6 +159,17 @@ def create_service(
         if not business:
             raise HTTPException(status_code=404, detail="Business not found")
 
+        # Validation: consultation_required needs consultation_duration
+        if service_data.booking_type == BookingTypeEnum.CONSULTATION_REQUIRED:
+            if not service_data.consultation_duration:
+                raise HTTPException(
+                    status_code=400,
+                    detail="consultation_duration is required when booking_type is consultation_required"
+                )
+
+        # Convert required_fields to dict format
+        required_fields_data = [field.dict() for field in service_data.required_fields]
+
         # Create service
         service = Service(
             id=uuid.uuid4(),
@@ -126,6 +179,11 @@ def create_service(
             price=Decimal(str(service_data.price)) if service_data.price is not None else None,
             price_display=service_data.price_display,
             duration=service_data.duration,
+            booking_type=BookingType[service_data.booking_type.name],
+            consultation_duration=service_data.consultation_duration,
+            consultation_price=Decimal(
+                str(service_data.consultation_price)) if service_data.consultation_price is not None else None,
+            required_fields=required_fields_data,
             display_order=service_data.display_order,
             is_active=True
         )
@@ -134,7 +192,7 @@ def create_service(
         db.commit()
         db.refresh(service)
 
-        logger.info(f"Created service {service.id}: {service.name}")
+        logger.info(f"Created service {service.id}: {service.name} (booking_type: {service.booking_type.value})")
 
         return _service_to_response(service, db)
 
@@ -165,6 +223,16 @@ def create_services_bulk(
         created_services = []
 
         for idx, service_data in enumerate(bulk_data.services):
+            # Validation
+            if service_data.booking_type == BookingTypeEnum.CONSULTATION_REQUIRED:
+                if not service_data.consultation_duration:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"consultation_duration required for service '{service_data.name}'"
+                    )
+
+            required_fields_data = [field.dict() for field in service_data.required_fields]
+
             service = Service(
                 id=uuid.uuid4(),
                 business_id=uuid.UUID(bulk_data.business_id),
@@ -173,6 +241,11 @@ def create_services_bulk(
                 price=Decimal(str(service_data.price)) if service_data.price is not None else None,
                 price_display=service_data.price_display,
                 duration=service_data.duration,
+                booking_type=BookingType[service_data.booking_type.name],
+                consultation_duration=service_data.consultation_duration,
+                consultation_price=Decimal(
+                    str(service_data.consultation_price)) if service_data.consultation_price is not None else None,
+                required_fields=required_fields_data,
                 display_order=service_data.display_order if service_data.display_order else idx,
                 is_active=True
             )
@@ -280,6 +353,26 @@ def update_service(
 
         if update_data.duration is not None:
             service.duration = update_data.duration
+
+        if update_data.booking_type is not None:
+            service.booking_type = BookingType[update_data.booking_type.name]
+
+            # Validate consultation_duration when switching to consultation_required
+            if update_data.booking_type == BookingTypeEnum.CONSULTATION_REQUIRED:
+                if not service.consultation_duration and not update_data.consultation_duration:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="consultation_duration required when booking_type is consultation_required"
+                    )
+
+        if update_data.consultation_duration is not None:
+            service.consultation_duration = update_data.consultation_duration
+
+        if update_data.consultation_price is not None:
+            service.consultation_price = Decimal(str(update_data.consultation_price))
+
+        if update_data.required_fields is not None:
+            service.required_fields = [field.dict() for field in update_data.required_fields]
 
         if update_data.display_order is not None:
             service.display_order = update_data.display_order
@@ -485,6 +578,7 @@ def migrate_from_service_catalog(
                     except:
                         price_display = str(price_val)
 
+            # Default to DIRECT booking with basic name field requirement
             service = Service(
                 id=uuid.uuid4(),
                 business_id=uuid.UUID(business_id),
@@ -493,6 +587,8 @@ def migrate_from_service_catalog(
                 price=price,
                 price_display=price_display,
                 duration=service_info.get('duration'),
+                booking_type=BookingType.DIRECT,
+                required_fields=[{"field": "name", "label": "Name", "type": "text", "required": True}],
                 display_order=idx,
                 is_active=True
             )
@@ -516,6 +612,8 @@ def migrate_from_service_catalog(
         logger.error(f"Error migrating services: {e}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/", response_model=ServiceListResponse)
 def list_all_services(
         db: Session = Depends(get_db)

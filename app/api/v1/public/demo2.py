@@ -13,7 +13,7 @@ import json
 
 from app.config.database import get_db
 from app.services.business.business_service import BusinessService
-from app.services.ai.ai_service import AIService
+from app.services.demo.demo_ai_service import DemoAIService
 from app.models.business.business import Business
 
 # NEW: Import demo storage service
@@ -199,7 +199,7 @@ async def send_message(
     ]
 
     # Initialize AI service
-    ai_service = AIService()
+    ai_service = DemoAIService()
 
     # Track what we're sending to AI for logging
     messages_sent_to_ai = formatted_messages.copy()
@@ -422,7 +422,7 @@ async def execute_demo_function(
         business_context: Dict[str, Any],
         demo_conversation_id: str,
         customer_phone: str,
-        ai_service: AIService,
+        ai_service: DemoAIService,
         session: Dict
 ) -> Dict[str, Any]:
     """
