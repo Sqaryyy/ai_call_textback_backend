@@ -173,6 +173,11 @@ async def register(
     Register a new user with an invite token.
     Sets httpOnly cookies for authentication.
     """
+    print("\n" + "=" * 80)
+    print("=== REGISTRATION START ===")
+    print(f"Email: {request.email}")
+    print(f"Invite token: {request.invite_token[:20]}...")
+
     # Validate the invite token (auto-detects type)
     is_valid, error_msg, invite = InviteService.validate_invite(
         db,
@@ -181,73 +186,138 @@ async def register(
     )
 
     if not is_valid:
+        print(f"ERROR: Invite validation failed: {error_msg}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_msg or "Invalid invite token"
         )
 
     if not invite:
+        print("ERROR: Invite not found after validation")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invite not found"
         )
 
+    print(f"\n✓ Invite validated successfully")
+    print(f"  - Invite ID: {invite.id}")
+    print(f"  - Invite type: {invite.invite_type}")
+    print(f"  - Invite role: {invite.role}")
+    print(f"  - Invite role type: {type(invite.role)}")
+    print(f"  - Invite role repr: {repr(invite.role)}")
+
     try:
         # Check if user with this email already exists
         existing_user = UserService.get_user_by_email(db, request.email)
+        print(f"\nExisting user check: {'Found' if existing_user else 'Not found'}")
 
         # Handle based on invite type
         if invite.invite_type == InviteType.PLATFORM:
+            print("\n" + "=" * 80)
+            print("=== PLATFORM INVITE FLOW ===")
+            print("=" * 80)
+
             if existing_user:
+                print("ERROR: User already exists for platform invite")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="User with this email already exists. Platform invites are for new users only."
                 )
 
             # Create the user
+            print("\n[1] Creating new user...")
             user = UserService.create_user(
                 db=db,
                 email=request.email,
                 password=request.password,
                 full_name=request.full_name
             )
+            print(f"  ✓ User created")
+            print(f"    - ID: {user.id}")
+            print(f"    - Email: {user.email}")
+            print(f"    - Name: {user.full_name}")
 
             # AUTO-CREATE DEFAULT BUSINESS FOR NEW USER
+            print("\n[2] Creating default business...")
             default_business = BusinessService.create_default_business(db, user.id)
+            print(f"  ✓ Business created")
+            print(f"    - ID: {default_business.id}")
+            print(f"    - Name: {default_business.name}")
+
             user.active_business_id = default_business.id
             db.flush()
+            print(f"  ✓ Set active_business_id to {default_business.id}")
 
             # Link user to business
+            print("\n[3] Linking user to business")
+            print("=" * 80)
+            association_id = uuid.uuid4()
+            print(f"  - association_id: {association_id} (type: {type(association_id)})")
+            print(f"  - user_id: {user.id} (type: {type(user.id)})")
+            print(f"  - business_id: {default_business.id} (type: {type(default_business.id)})")
+            print(f"  - role: 'owner' (hardcoded string)")
+
             stmt = user_business_association.insert().values(
-                id=uuid.uuid4(),
+                id=association_id,
                 user_id=user.id,
                 business_id=default_business.id,
                 role="owner"
             )
-            db.execute(stmt)
+
+            print(f"\n  Executing INSERT statement...")
+            print(f"  Statement object: {stmt}")
+            print(f"  Statement compile: {stmt.compile(compile_kwargs={'literal_binds': True})}")
+
+            try:
+                result = db.execute(stmt)
+                print(f"  ✓ INSERT executed successfully")
+                print(f"  Result: {result}")
+            except Exception as insert_error:
+                print("\n" + "!" * 80)
+                print("!!! INSERT FAILED !!!")
+                print("!" * 80)
+                print(f"  Error type: {type(insert_error).__name__}")
+                print(f"  Error message: {str(insert_error)}")
+                print(f"  Error args: {insert_error.args}")
+                if hasattr(insert_error, 'orig'):
+                    print(f"  Original error: {insert_error.orig}")
+                print("!" * 80)
+                raise
 
             # Mark the platform invite as used
+            print("\n[4] Marking platform invite as used...")
             PlatformInviteService.use_platform_invite(db, invite.id)
+            print("  ✓ Invite marked as used")
 
             # Create email verification token
+            print("\n[5] Creating email verification token...")
             verification = EmailVerification.create_for_user(user.id, expiry_hours=24)
             db.add(verification)
             db.commit()
             db.refresh(verification)
+            print(f"  ✓ Verification token created: {verification.token[:20]}...")
 
             # Send verification email via Celery
+            print("\n[6] Sending verification email...")
             send_verification_email.delay(
                 email=user.email,
                 token=verification.token,
                 user_name=user.full_name
             )
+            print("  ✓ Email task queued")
 
             # Generate tokens and set cookies
+            print("\n[7] Generating auth tokens...")
             access_token = create_access_token(
                 data={"sub": str(user.id), "email": user.email}
             )
             refresh_token_obj = create_refresh_token(db, user.id)
             set_auth_cookies(response, access_token, refresh_token_obj.token)
+            print("  ✓ Tokens generated and cookies set")
+
+            print("\n" + "=" * 80)
+            print("=== REGISTRATION COMPLETE ===")
+            print("=" * 80 + "\n")
 
             return MessageResponse(
                 message="Registration successful! Your business has been created.",
@@ -261,21 +331,31 @@ async def register(
                 }
             )
         else:
-            # BUSINESS INVITE logic (same as before, but with cookies)
+            print("\n" + "=" * 80)
+            print("=== BUSINESS INVITE FLOW ===")
+            print("=" * 80)
+
+            # BUSINESS INVITE logic
             if not invite.business_id:
+                print("ERROR: Business invite missing business_id")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Business invite is missing business_id"
                 )
 
+            print(f"Business ID from invite: {invite.business_id}")
+
             if not existing_user:
+                print("\n[1] Creating new user...")
                 user = UserService.create_user(
                     db=db,
                     email=request.email,
                     password=request.password,
                     full_name=request.full_name
                 )
+                print(f"  ✓ User created: {user.id}")
             else:
+                print("\n[1] Using existing user...")
                 existing_role = UserService.get_user_role_in_business(
                     db=db,
                     user_id=existing_user.id,
@@ -283,24 +363,47 @@ async def register(
                 )
 
                 if existing_role:
+                    print(f"ERROR: User already member with role: {existing_role}")
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="User is already a member of this business"
                     )
                 user = existing_user
+                print(f"  ✓ Existing user: {user.id}")
 
             business_role = invite.role
+            print(f"\n[2] Adding user to business")
+            print(f"  - user_id: {user.id}")
+            print(f"  - business_id: {invite.business_id}")
+            print(f"  - role from invite: {business_role}")
+            print(f"  - role type: {type(business_role)}")
+            print(f"  - role repr: {repr(business_role)}")
 
-            UserService.add_user_to_business(
-                db=db,
-                user_id=user.id,
-                business_id=invite.business_id,
-                role=business_role
-            )
+            try:
+                UserService.add_user_to_business(
+                    db=db,
+                    user_id=user.id,
+                    business_id=invite.business_id,
+                    role=business_role
+                )
+                print("  ✓ User added to business successfully")
+            except Exception as add_error:
+                print("\n" + "!" * 80)
+                print("!!! ADD USER TO BUSINESS FAILED !!!")
+                print("!" * 80)
+                print(f"  Error type: {type(add_error).__name__}")
+                print(f"  Error message: {str(add_error)}")
+                if hasattr(add_error, 'orig'):
+                    print(f"  Original error: {add_error.orig}")
+                print("!" * 80)
+                raise
 
+            print("\n[3] Marking business invite as used...")
             BusinessInviteService.use_business_invite(db, invite.id)
+            print("  ✓ Invite marked as used")
 
             if not existing_user:
+                print("\n[4] Creating verification for new user...")
                 verification = EmailVerification.create_for_user(user.id, expiry_hours=24)
                 db.add(verification)
                 db.commit()
@@ -311,16 +414,23 @@ async def register(
                     token=verification.token,
                     user_name=user.full_name
                 )
+                print("  ✓ Verification email queued")
 
             # Generate tokens and set cookies
+            print("\n[5] Generating auth tokens...")
             access_token = create_access_token(
                 data={"sub": str(user.id), "email": user.email}
             )
             refresh_token_obj = create_refresh_token(db, user.id)
             set_auth_cookies(response, access_token, refresh_token_obj.token)
+            print("  ✓ Tokens set")
 
             from app.models.business.business import Business
             business = db.query(Business).filter(Business.id == invite.business_id).first()
+
+            print("\n" + "=" * 80)
+            print("=== REGISTRATION COMPLETE ===")
+            print("=" * 80 + "\n")
 
             return MessageResponse(
                 message=f"Registration successful! You've been added to {business.name if business else 'the business'}.",
@@ -337,13 +447,26 @@ async def register(
             )
 
     except ValueError as e:
+        print(f"\nValueError caught: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except HTTPException:
+        print("\nHTTPException caught - re-raising")
         raise
     except Exception as e:
+        print("\n" + "!" * 80)
+        print("!!! UNEXPECTED ERROR !!!")
+        print("!" * 80)
+        print(f"  Error type: {type(e).__name__}")
+        print(f"  Error message: {str(e)}")
+        print(f"  Error args: {e.args}")
+        if hasattr(e, '__traceback__'):
+            import traceback
+            print("\nTraceback:")
+            traceback.print_exc()
+        print("!" * 80 + "\n")
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
