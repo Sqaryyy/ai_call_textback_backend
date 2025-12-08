@@ -289,11 +289,7 @@ async def register(
                     )
                 user = existing_user
 
-            role_map = {
-                "owner": BusinessRole.OWNER,
-                "member": BusinessRole.MEMBER
-            }
-            business_role = role_map.get(invite.role, BusinessRole.MEMBER)
+            business_role = invite.role
 
             UserService.add_user_to_business(
                 db=db,
