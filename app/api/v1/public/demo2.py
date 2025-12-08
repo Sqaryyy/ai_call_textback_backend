@@ -18,6 +18,7 @@ from app.models.business.business import Business
 
 # NEW: Import demo storage service
 from app.services.demo.demo_storage_service import DemoStorageService
+from app.models.demo import DemoMessage, DemoAIContextLog  # Add this import
 
 router = APIRouter()
 
@@ -81,24 +82,16 @@ async def start_demo(
         request: StartDemoRequest,
         db: Session = Depends(get_db)
 ):
-    """
-    Start a new demo conversation session.
-    Creates a demo conversation with greeting message.
-    """
-    # Validate business exists
+    """Start a new demo conversation session."""
     business = db.query(Business).filter(Business.id == request.business_id).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
-    # Generate demo customer phone
     customer_phone = f"+1555DEMO{uuid.uuid4().hex[:4]}"
     business_phone = business.phone_number
     business_name = business.name or "our business"
-
-    # Generate session ID
     session_id = str(uuid.uuid4())
 
-    # NEW: Create demo conversation in demo tables
     demo_conversation = DemoStorageService.create_demo_conversation(
         db=db,
         session_id=session_id,
@@ -106,7 +99,6 @@ async def start_demo(
         customer_phone=customer_phone
     )
 
-    # Store session in memory
     demo_sessions[session_id] = {
         "demo_conversation_id": str(demo_conversation.id),
         "customer_phone": customer_phone,
@@ -114,13 +106,12 @@ async def start_demo(
         "business_overrides": {}
     }
 
-    # Send initial greeting
     greeting = f"Hey, this is {business_name}. We have missed your call. How can we help?"
 
-    # NEW: Log greeting message
+    # FIX: Pass UUID object, not string
     DemoStorageService.log_demo_message(
         db=db,
-        demo_conversation_id=demo_conversation.id,
+        demo_conversation_id=demo_conversation.id,  # Pass UUID directly
         role="assistant",
         content=greeting
     )
@@ -138,12 +129,7 @@ async def send_message(
         request: SendMessageRequest,
         db: Session = Depends(get_db)
 ):
-    """
-    Send a customer message and get AI response.
-    Handles the full conversation flow including function calls.
-    NOW LOGS ALL AI CONTEXT FOR ANALYTICS.
-    """
-    # Get session from memory
+    """Send a customer message and get AI response."""
     session = demo_sessions.get(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Demo session not found or expired")
@@ -152,44 +138,42 @@ async def send_message(
     customer_phone = session["customer_phone"]
     business_id = session["business_id"]
 
-    # Get business
     business = db.query(Business).filter(Business.id == business_id).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
     business_phone = business.phone_number
 
-    # NEW: Log customer message
+    # FIX: Get the conversation to use its UUID
+    demo_conversation = DemoStorageService.get_demo_conversation(db, request.session_id)
+    if not demo_conversation:
+        raise HTTPException(status_code=404, detail="Demo conversation not found")
+
+    # FIX: Log customer message with UUID
     customer_message = DemoStorageService.log_demo_message(
         db=db,
-        demo_conversation_id=demo_conversation_id,
+        demo_conversation_id=demo_conversation.id,  # Use UUID from conversation object
         role="customer",
         content=request.message
     )
 
-    # Get or create conversation state (using in-memory state for demo)
-    # We'll track this separately from production conversation_state table
     conv_state = {
         "flow_state": session.get("flow_state", "gathering_info"),
         "customer_info": session.get("customer_info", {})
     }
 
-    # Get context
     business_context = BusinessService.get_business_context(db, business_id)
     business_context["business_id"] = business_id
 
-    # Apply session-specific business overrides
     business_overrides = session.get("business_overrides", {})
     if business_overrides:
         business_context.update(business_overrides)
 
-    # Get all previous demo messages for context
-    demo_conversation = DemoStorageService.get_demo_conversation(db, request.session_id)
-    all_messages = db.query(DemoStorageService.DemoMessage).filter(
-        DemoStorageService.DemoMessage.demo_conversation_id == demo_conversation.id
-    ).order_by(DemoStorageService.DemoMessage.created_at).all()
+    # FIX: Query DemoMessage directly, not through service
+    all_messages = db.query(DemoMessage).filter(
+        DemoMessage.demo_conversation_id == demo_conversation.id
+    ).order_by(DemoMessage.created_at).all()
 
-    # Format messages for AI
     formatted_messages = [
         {
             "role": msg.role if msg.role != "customer" else "user",
@@ -198,10 +182,7 @@ async def send_message(
         for msg in all_messages
     ]
 
-    # Initialize AI service
     ai_service = DemoAIService()
-
-    # Track what we're sending to AI for logging
     messages_sent_to_ai = formatted_messages.copy()
 
     ai_response = ai_service.generate_response(
@@ -211,24 +192,20 @@ async def send_message(
         db=db
     )
 
-    # Track function calls for response and logging
     function_calls_log = []
-    rag_context_captured = None  # Capture RAG if available
+    rag_context_captured = None
 
     # Handle function calls
     while ai_response.get("function_call"):
         function_name = ai_response['function_call']['name']
         function_args = ai_response['function_call']['arguments']
 
-        # Inject required parameters
         if function_name in ["get_customer_appointments", "cancel_appointment", "reschedule_appointment"]:
             function_args["customer_phone"] = customer_phone
 
         if function_name in ["get_customer_info", "set_customer_info"]:
-            # Use demo conversation ID for state
             function_args["conversation_id"] = demo_conversation_id
 
-        # Execute function
         function_result = await execute_demo_function(
             db=db,
             function_name=function_name,
@@ -241,14 +218,12 @@ async def send_message(
             session=session
         )
 
-        # Log function call
         function_calls_log.append({
             "name": function_name,
             "arguments": function_args,
             "result": function_result
         })
 
-        # Add to message history
         formatted_messages.append({
             "role": "assistant",
             "content": None,
@@ -260,7 +235,6 @@ async def send_message(
             "content": json.dumps(function_result)
         })
 
-        # Get next AI response
         ai_response = ai_service.generate_response(
             messages=formatted_messages,
             business_context=business_context,
@@ -268,10 +242,10 @@ async def send_message(
             db=db
         )
 
-    # NEW: Log complete AI context
+    # FIX: Use UUID for logging
     DemoStorageService.log_ai_context(
         db=db,
-        demo_conversation_id=demo_conversation_id,
+        demo_conversation_id=demo_conversation.id,  # Use UUID
         demo_message_id=str(customer_message.id),
         business_context=business_context,
         conversation_context=conv_state,
@@ -282,16 +256,15 @@ async def send_message(
         finish_reason=ai_response.get("finish_reason")
     )
 
-    # Save final AI response
+    # FIX: Use UUID for final message
     if ai_response.get("content"):
         DemoStorageService.log_demo_message(
             db=db,
-            demo_conversation_id=demo_conversation_id,
+            demo_conversation_id=demo_conversation.id,  # Use UUID
             role="assistant",
             content=ai_response["content"]
         )
 
-    # Update session state
     session["flow_state"] = conv_state["flow_state"]
     session["customer_info"] = conv_state["customer_info"]
 
@@ -314,22 +287,18 @@ async def get_conversation(
         session_id: str,
         db: Session = Depends(get_db)
 ):
-    """
-    Get full conversation history for a demo session.
-    Useful for page refresh or reconnection.
-    """
+    """Get full conversation history for a demo session."""
     session = demo_sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Demo session not found or expired")
 
     demo_conversation_id = session["demo_conversation_id"]
 
-    # Get messages from demo tables
-    messages = db.query(DemoStorageService.DemoMessage).filter(
-        DemoStorageService.DemoMessage.demo_conversation_id == demo_conversation_id
-    ).order_by(DemoStorageService.DemoMessage.created_at).all()
+    # FIX: Query DemoMessage directly
+    messages = db.query(DemoMessage).filter(
+        DemoMessage.demo_conversation_id == demo_conversation_id
+    ).order_by(DemoMessage.created_at).all()
 
-    # Get state from session
     conv_state = {
         "flow_state": session.get("flow_state", "gathering_info"),
         "customer_info": session.get("customer_info", {})
