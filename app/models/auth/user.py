@@ -33,7 +33,18 @@ user_business_association = Table(
     Column('id', UUID(as_uuid=True), primary_key=True, default=uuid.uuid4),
     Column('user_id', UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False),
     Column('business_id', UUID(as_uuid=True), ForeignKey('businesses.id', ondelete='CASCADE'), nullable=False),
-    Column('role', SQLEnum(BusinessRole), default=BusinessRole.MEMBER, nullable=False),
+    # FIX: Add values_callable to use enum values ("owner", "member") not names (OWNER, MEMBER)
+    Column(
+        'role',
+        SQLEnum(
+            BusinessRole,
+            name="businessrole",  # Match your PostgreSQL enum name
+            create_type=False,     # Don't try to create the enum (it already exists)
+            values_callable=lambda x: [e.value for e in x]  # Use "owner", "member" not OWNER, MEMBER
+        ),
+        default=BusinessRole.MEMBER,
+        nullable=False
+    ),
     Column('created_at', DateTime(timezone=True), server_default=func.now())
 )
 

@@ -261,7 +261,7 @@ async def register(
                 id=association_id,
                 user_id=user.id,
                 business_id=default_business.id,
-                role="owner"
+                role=BusinessRole.OWNER
             )
 
             print(f"\n  Executing INSERT statement...")
@@ -812,7 +812,7 @@ async def validate_invite(
             message="Valid platform invite",
             invite_type="platform",
             business_name=None,
-            role="owner"
+            role=BusinessRole.OWNER
         )
     else:
         from app.models.business.business import Business
