@@ -79,7 +79,7 @@ class PlatformInviteResponse(BaseModel):
                 "expires_at": "2025-10-26T12:00:00+00:00",
                 "created_at": "2025-10-19T12:00:00+00:00",
                 "used_at": None,
-                "invite_url": "http://localhost:3000/register?invite=abc123xyz789def456ghi012"
+                "invite_url": "https://voxiodesk.com/register?invite=abc123xyz789def456ghi012"
             }
         }
 
