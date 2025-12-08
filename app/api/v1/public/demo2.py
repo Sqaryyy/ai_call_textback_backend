@@ -82,16 +82,24 @@ async def start_demo(
         request: StartDemoRequest,
         db: Session = Depends(get_db)
 ):
-    """Start a new demo conversation session."""
+    """
+    Start a new demo conversation session.
+    Creates a demo conversation with greeting message.
+    """
+    # Validate business exists
     business = db.query(Business).filter(Business.id == request.business_id).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
+    # Generate demo customer phone
     customer_phone = f"+1555DEMO{uuid.uuid4().hex[:4]}"
     business_phone = business.phone_number
     business_name = business.name or "our business"
+
+    # Generate session ID
     session_id = str(uuid.uuid4())
 
+    # Create demo conversation in demo tables
     demo_conversation = DemoStorageService.create_demo_conversation(
         db=db,
         session_id=session_id,
@@ -99,6 +107,7 @@ async def start_demo(
         customer_phone=customer_phone
     )
 
+    # Store session in memory
     demo_sessions[session_id] = {
         "demo_conversation_id": str(demo_conversation.id),
         "customer_phone": customer_phone,
@@ -106,15 +115,18 @@ async def start_demo(
         "business_overrides": {}
     }
 
+    # Send initial greeting
     greeting = f"Hey, this is {business_name}. We have missed your call. How can we help?"
 
-    # FIX: Pass UUID object, not string
+    # Log greeting message
     DemoStorageService.log_demo_message(
         db=db,
-        demo_conversation_id=demo_conversation.id,  # Pass UUID directly
+        demo_conversation_id=demo_conversation.id,  # Use UUID
         role="assistant",
         content=greeting
     )
+
+    db.commit()
 
     return StartDemoResponse(
         session_id=session_id,
@@ -129,7 +141,12 @@ async def send_message(
         request: SendMessageRequest,
         db: Session = Depends(get_db)
 ):
-    """Send a customer message and get AI response."""
+    """
+    Send a customer message and get AI response.
+    Handles the full conversation flow including function calls.
+    NOW LOGS ALL AI CONTEXT FOR ANALYTICS.
+    """
+    # Get session from memory
     session = demo_sessions.get(request.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Demo session not found or expired")
@@ -138,42 +155,47 @@ async def send_message(
     customer_phone = session["customer_phone"]
     business_id = session["business_id"]
 
+    # Get business
     business = db.query(Business).filter(Business.id == business_id).first()
     if not business:
         raise HTTPException(status_code=404, detail="Business not found")
 
     business_phone = business.phone_number
 
-    # FIX: Get the conversation to use its UUID
+    # Get the conversation to use its UUID
     demo_conversation = DemoStorageService.get_demo_conversation(db, request.session_id)
     if not demo_conversation:
         raise HTTPException(status_code=404, detail="Demo conversation not found")
 
-    # FIX: Log customer message with UUID
+    # Log customer message with UUID
     customer_message = DemoStorageService.log_demo_message(
         db=db,
-        demo_conversation_id=demo_conversation.id,  # Use UUID from conversation object
+        demo_conversation_id=demo_conversation.id,
         role="customer",
         content=request.message
     )
 
+    # Get or create conversation state
     conv_state = {
         "flow_state": session.get("flow_state", "gathering_info"),
         "customer_info": session.get("customer_info", {})
     }
 
+    # Get context
     business_context = BusinessService.get_business_context(db, business_id)
     business_context["business_id"] = business_id
 
+    # Apply session-specific business overrides
     business_overrides = session.get("business_overrides", {})
     if business_overrides:
         business_context.update(business_overrides)
 
-    # FIX: Query DemoMessage directly, not through service
+    # Get all previous demo messages for context
     all_messages = db.query(DemoMessage).filter(
         DemoMessage.demo_conversation_id == demo_conversation.id
     ).order_by(DemoMessage.created_at).all()
 
+    # Format messages for AI
     formatted_messages = [
         {
             "role": msg.role if msg.role != "customer" else "user",
@@ -182,7 +204,10 @@ async def send_message(
         for msg in all_messages
     ]
 
+    # Initialize AI service
     ai_service = DemoAIService()
+
+    # Track what we're sending to AI for logging
     messages_sent_to_ai = formatted_messages.copy()
 
     ai_response = ai_service.generate_response(
@@ -192,6 +217,7 @@ async def send_message(
         db=db
     )
 
+    # Track function calls for response and logging
     function_calls_log = []
     rag_context_captured = None
 
@@ -200,12 +226,14 @@ async def send_message(
         function_name = ai_response['function_call']['name']
         function_args = ai_response['function_call']['arguments']
 
+        # Inject required parameters
         if function_name in ["get_customer_appointments", "cancel_appointment", "reschedule_appointment"]:
             function_args["customer_phone"] = customer_phone
 
         if function_name in ["get_customer_info", "set_customer_info"]:
             function_args["conversation_id"] = demo_conversation_id
 
+        # Execute function
         function_result = await execute_demo_function(
             db=db,
             function_name=function_name,
@@ -218,12 +246,14 @@ async def send_message(
             session=session
         )
 
+        # Log function call
         function_calls_log.append({
             "name": function_name,
             "arguments": function_args,
             "result": function_result
         })
 
+        # Add to message history
         formatted_messages.append({
             "role": "assistant",
             "content": None,
@@ -235,6 +265,7 @@ async def send_message(
             "content": json.dumps(function_result)
         })
 
+        # Get next AI response
         ai_response = ai_service.generate_response(
             messages=formatted_messages,
             business_context=business_context,
@@ -242,10 +273,10 @@ async def send_message(
             db=db
         )
 
-    # FIX: Use UUID for logging
+    # Log complete AI context
     DemoStorageService.log_ai_context(
         db=db,
-        demo_conversation_id=demo_conversation.id,  # Use UUID
+        demo_conversation_id=demo_conversation.id,
         demo_message_id=str(customer_message.id),
         business_context=business_context,
         conversation_context=conv_state,
@@ -256,15 +287,19 @@ async def send_message(
         finish_reason=ai_response.get("finish_reason")
     )
 
-    # FIX: Use UUID for final message
+    # Save final AI response
     if ai_response.get("content"):
         DemoStorageService.log_demo_message(
             db=db,
-            demo_conversation_id=demo_conversation.id,  # Use UUID
+            demo_conversation_id=demo_conversation.id,
             role="assistant",
             content=ai_response["content"]
         )
 
+    # ✅ COMMIT HERE - Save all messages and AI context to database
+    db.commit()
+
+    # Update session state
     session["flow_state"] = conv_state["flow_state"]
     session["customer_info"] = conv_state["customer_info"]
 
