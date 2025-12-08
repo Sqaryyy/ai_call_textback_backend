@@ -222,7 +222,7 @@ async def register(
                 id=uuid.uuid4(),
                 user_id=user.id,
                 business_id=default_business.id,
-                role=BusinessRole.OWNER.value
+                role="owner"
             )
             db.execute(stmt)
 
