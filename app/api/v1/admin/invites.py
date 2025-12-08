@@ -241,6 +241,7 @@ async def get_platform_invite(
 
     invite_url = PlatformInviteService.get_invite_url(invite, settings.FRONTEND_URL)
 
+
     return PlatformInviteResponse(
         id=str(invite.id),
         token=invite.token,
