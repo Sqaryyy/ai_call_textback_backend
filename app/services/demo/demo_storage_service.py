@@ -24,23 +24,16 @@ class DemoStorageService:
             customer_phone: str
     ) -> DemoConversation:
         """Create a new demo conversation session"""
-        try:
-            conversation = DemoConversation(
-                session_id=session_id,
-                business_id=business_id,
-                customer_phone=customer_phone
-            )
-            db.add(conversation)
-            db.commit()
-            db.refresh(conversation)
+        conversation = DemoConversation(
+            session_id=session_id,
+            business_id=business_id,
+            customer_phone=customer_phone
+        )
+        db.add(conversation)
+        db.flush()  # Flush to get the ID without committing
 
-            logger.info(f"📝 Created demo conversation: {session_id}")
-            return conversation
-
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error creating demo conversation: {e}")
-            raise
+        logger.info(f"📝 Created demo conversation: {session_id}")
+        return conversation
 
     @staticmethod
     def get_demo_conversation(
@@ -60,23 +53,16 @@ class DemoStorageService:
             content: str
     ) -> DemoMessage:
         """Log a message in demo conversation"""
-        try:
-            message = DemoMessage(
-                demo_conversation_id=demo_conversation_id,
-                role=role,
-                content=content
-            )
-            db.add(message)
-            db.commit()
-            db.refresh(message)
+        message = DemoMessage(
+            demo_conversation_id=demo_conversation_id,
+            role=role,
+            content=content
+        )
+        db.add(message)
+        db.flush()  # Flush to get the ID without committing
 
-            logger.debug(f"💬 Logged demo message: {role}")
-            return message
-
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error logging demo message: {e}")
-            raise
+        logger.debug(f"💬 Logged demo message: {role}")
+        return message
 
     @staticmethod
     def log_ai_context(
@@ -95,29 +81,22 @@ class DemoStorageService:
         Log complete AI context for analytics.
         This captures everything that was fed to the AI for a response.
         """
-        try:
-            log_entry = DemoAIContextLog(
-                demo_conversation_id=demo_conversation_id,
-                demo_message_id=demo_message_id,
-                business_context=business_context,
-                conversation_context=conversation_context,
-                rag_context=rag_context,
-                messages_sent_to_ai=messages_sent_to_ai,
-                function_calls=function_calls or [],
-                ai_response=ai_response,
-                finish_reason=finish_reason
-            )
-            db.add(log_entry)
-            db.commit()
-            db.refresh(log_entry)
+        log_entry = DemoAIContextLog(
+            demo_conversation_id=demo_conversation_id,
+            demo_message_id=demo_message_id,
+            business_context=business_context,
+            conversation_context=conversation_context,
+            rag_context=rag_context,
+            messages_sent_to_ai=messages_sent_to_ai,
+            function_calls=function_calls or [],
+            ai_response=ai_response,
+            finish_reason=finish_reason
+        )
+        db.add(log_entry)
+        db.flush()  # Flush to get the ID without committing
 
-            logger.debug(f"🤖 Logged AI context: {len(function_calls or [])} function calls")
-            return log_entry
-
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error logging AI context: {e}")
-            raise
+        logger.debug(f"🤖 Logged AI context: {len(function_calls or [])} function calls")
+        return log_entry
 
     @staticmethod
     def get_conversation_history(
@@ -176,23 +155,17 @@ class DemoStorageService:
         Manually cleanup demos older than specified days.
         Returns number of deleted conversations.
         """
-        try:
-            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
 
-            old_conversations = db.query(DemoConversation).filter(
-                DemoConversation.created_at < cutoff_date
-            ).all()
+        old_conversations = db.query(DemoConversation).filter(
+            DemoConversation.created_at < cutoff_date
+        ).all()
 
-            count = len(old_conversations)
+        count = len(old_conversations)
 
-            for conv in old_conversations:
-                db.delete(conv)
+        for conv in old_conversations:
+            db.delete(conv)
 
-            db.commit()
-            logger.info(f"🗑️ Cleaned up {count} old demo conversations")
-            return count
-
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error cleaning up old demos: {e}")
-            raise
+        db.flush()  # Flush deletions
+        logger.info(f"🗑️ Cleaned up {count} old demo conversations")
+        return count
