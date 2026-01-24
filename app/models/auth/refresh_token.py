@@ -2,6 +2,7 @@
 # FILE: app/models/refresh_token.py
 # Refresh token model for JWT token management with auto-cleanup
 # ============================================================================
+import logging
 from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, event
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship, Session
@@ -11,6 +12,7 @@ import uuid
 import secrets
 from app.models.base import Base
 
+logger = logging.getLogger(__name__)
 
 class RefreshToken(Base):
     """
@@ -74,29 +76,27 @@ class RefreshToken(Base):
 # Auto-cleanup: Delete expired tokens on session flush
 # ============================================================================
 
+# In app/models/auth/refresh_token.py
+
 @event.listens_for(Session, "after_flush")
 def cleanup_expired_tokens(session, flush_context):
-    """
-    Automatically delete expired refresh tokens after each database flush.
-
-    This runs periodically to keep the database clean without requiring
-    a separate cleanup job.
-    """
+    """Clean up expired refresh tokens after each flush - FIXED VERSION"""
     try:
-        # Only run cleanup occasionally (not every flush)
-        # Use a simple random check to run ~10% of the time
-        import random
-        if random.random() > 0.1:
-            return
-
-        # Delete expired tokens
-        deleted = session.query(RefreshToken).filter(
+        # Get expired tokens
+        expired_tokens = session.query(RefreshToken).filter(
             RefreshToken.expires_at < datetime.now(timezone.utc)
-        ).delete(synchronize_session=False)
+        ).all()
 
-        if deleted > 0:
-            session.commit()
+        if expired_tokens:
+            # Just mark them for deletion - don't commit here!
+            for token in expired_tokens:
+                session.delete(token)
 
-    except Exception:
-        # Don't let cleanup errors break the main transaction
-        session.rollback()
+            logger.info(f"Marked {len(expired_tokens)} expired tokens for deletion")
+            # ✅ Let the parent transaction handle the commit
+            # DON'T call session.commit() or session.rollback() here!
+
+    except Exception as e:
+        logger.error(f"Error during token cleanup: {e}")
+        # ✅ Don't rollback - just log the error
+        # Let the parent transaction handle rollback if needed

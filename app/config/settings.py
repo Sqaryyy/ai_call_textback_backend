@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     """Application settings from environment variables"""
 
     # Basic app settings
+    ENVIRONMENT: str = "development"
     TESTING_FLOW: bool = Field(default=False)
     DEBUG: bool = Field(default=False)
     APP_NAME: str = Field(default="After-Hours Service")
@@ -65,8 +66,16 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = Field(default="")
     TWILIO_WEBHOOK_SECRET: str = Field(default="")
 
+    # Resend settings
+    RESEND_API_KEY: str = Field()
+    ALERT_EMAIL_TO: str = Field()
+    ALERT_EMAIL_FROM: str = Field()
+
+    # Sentry settings
+    SENTRY_DSN: Optional[str] = None
+
     # OpenAI settings
-    OPENAI_API_KEY: str = Field(default="")
+    OPENAI_API_KEY: str = Field()
     OPENAI_MODEL: str = Field(default="gpt-4")
     OPENAI_MAX_TOKENS: int = Field(default=500)
 

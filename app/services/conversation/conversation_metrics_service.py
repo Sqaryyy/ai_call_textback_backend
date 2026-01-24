@@ -8,8 +8,7 @@ from typing import Optional, Dict, List
 from uuid import uuid4
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from app.models.conversation.conversation_metrics import ConversationMetrics
-
+from app.models.conversation.conversation_metrics import ConversationMetrics,ConversationStatus
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +94,25 @@ class ConversationMetricsService:
                 metrics.bot_messages += 1
             db.commit()
 
+    @staticmethod
+    def mark_booking_initiated(db: Session, conversation_id: str):
+        """Mark that customer started the booking process"""
+        from datetime import datetime, timezone
+
+        metrics = db.query(ConversationMetrics).filter(
+            ConversationMetrics.conversation_id == conversation_id
+        ).first()
+
+        if not metrics:
+            logger.warning(f"No metrics found for conversation {conversation_id}")
+            return
+
+        # Only mark once (don't overwrite if already set)
+        if not metrics.booking_initiated:
+            metrics.booking_initiated = True
+            metrics.booking_initiated_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(f"✅ Marked booking initiated for {conversation_id}")
     @staticmethod
     def mark_booking_created(
             db: Session,
@@ -267,3 +285,139 @@ class ConversationMetricsService:
             {"flow_state": state, "drop_off_count": count}
             for state, count in results
         ]
+
+    @staticmethod
+    def mark_soft_close(db: Session, conversation_id: str) -> None:
+        """
+        Mark conversation as soft-closed (natural ending detected).
+        Starts grace period - customer can still reopen within 15 minutes.
+        """
+        try:
+            metrics = db.query(ConversationMetrics).filter(
+                ConversationMetrics.conversation_id == conversation_id
+            ).first()
+
+            if not metrics:
+                logger.warning(f"No metrics found for conversation {conversation_id}")
+                return
+
+            # Only soft-close if currently active
+            if metrics.conversation_status == ConversationStatus.active:
+                metrics.conversation_status = ConversationStatus.soft_close
+                metrics.soft_close_at = datetime.utcnow()
+                db.commit()
+                logger.info(f"✅ Marked conversation as soft_close: {conversation_id}")
+            else:
+                logger.debug(f"Conversation {conversation_id} already in state: {metrics.conversation_status}")
+
+        except Exception as e:
+            logger.error(f"Error marking soft close: {e}")
+            db.rollback()
+
+    @staticmethod
+    def reopen_conversation(db: Session, conversation_id: str) -> None:
+        """
+        Reopen a soft-closed conversation (customer returned within grace period).
+        """
+        try:
+            metrics = db.query(ConversationMetrics).filter(
+                ConversationMetrics.conversation_id == conversation_id
+            ).first()
+
+            if not metrics:
+                logger.warning(f"No metrics found for conversation {conversation_id}")
+                return
+
+            if metrics.conversation_status == ConversationStatus.soft_close:
+                metrics.conversation_status = ConversationStatus.active
+                metrics.soft_close_at = None
+                db.commit()
+                logger.info(f"🔄 Reopened soft-closed conversation: {conversation_id}")
+
+        except Exception as e:
+            logger.error(f"Error reopening conversation: {e}")
+            db.rollback()
+
+    @staticmethod
+    def mark_conversation_completed(
+            db: Session,
+            conversation_id: str,
+            last_flow_state: str,
+            dropped_off: bool = False
+    ) -> None:
+        """
+        Mark conversation as hard-closed (definitively complete).
+        This is the final state - conversation won't reopen.
+        """
+        try:
+            metrics = db.query(ConversationMetrics).filter(
+                ConversationMetrics.conversation_id == conversation_id
+            ).first()
+
+            if not metrics:
+                logger.warning(f"No metrics found for conversation {conversation_id}")
+                return
+
+            # Set appropriate status
+            if dropped_off:
+                metrics.conversation_status = ConversationStatus.dropped
+            else:
+                metrics.conversation_status = ConversationStatus.hard_close
+
+            # Set timestamps
+            now = datetime.utcnow()
+            metrics.hard_close_at = now
+            metrics.conversation_ended_at = now
+
+            # Backward compatibility flags
+            metrics.conversation_completed = True
+            metrics.dropped_off = dropped_off
+            metrics.last_flow_state = last_flow_state
+
+            # Calculate conversation duration
+            if metrics.first_response_at and metrics.outreach_sent_at:
+                metrics.conversation_duration_seconds = int(
+                    (now - metrics.first_response_at).total_seconds()
+                )
+
+            db.commit()
+            status_name = "dropped" if dropped_off else "hard_close"
+            logger.info(f"✅ Marked conversation as {status_name}: {conversation_id}")
+
+        except Exception as e:
+            logger.error(f"Error marking conversation completed: {e}")
+            db.rollback()
+
+    @staticmethod
+    def finalize_soft_close(db: Session, conversation_id: str) -> None:
+        """
+        Convert soft_close to hard_close (grace period expired, no customer return).
+        """
+        try:
+            metrics = db.query(ConversationMetrics).filter(
+                ConversationMetrics.conversation_id == conversation_id
+            ).first()
+
+            if not metrics:
+                logger.warning(f"No metrics found for conversation {conversation_id}")
+                return
+
+            if metrics.conversation_status == ConversationStatus.soft_close:
+                now = datetime.utcnow()
+                metrics.conversation_status = ConversationStatus.hard_close
+                metrics.hard_close_at = now
+                metrics.conversation_ended_at = now
+                metrics.conversation_completed = True  # Backward compatibility
+
+                # Calculate duration
+                if metrics.first_response_at:
+                    metrics.conversation_duration_seconds = int(
+                        (now - metrics.first_response_at).total_seconds()
+                    )
+
+                db.commit()
+                logger.info(f"✅ Finalized soft_close → hard_close: {conversation_id}")
+
+        except Exception as e:
+            logger.error(f"Error finalizing soft close: {e}")
+            db.rollback()

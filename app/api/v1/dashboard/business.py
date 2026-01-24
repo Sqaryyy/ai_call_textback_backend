@@ -2,11 +2,11 @@
 Business Management Dashboard Routes
 Session-authenticated endpoints for managing business information and knowledge
 Updated for new de-bloated Business model structure
+UPDATED: Added comprehensive logging with PII protection
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 import time
-import logging
 
 from app.config.database import get_db
 from app.models.auth.user import User
@@ -21,8 +21,9 @@ from app.schemas.business import (
     ManualReindexResponse
 )
 from app.services.ai.rag_service import RAGService
+from app.utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 router = APIRouter(tags=["dashboard-business"])
 
 # Fields that trigger knowledge reindexing when changed
@@ -114,20 +115,32 @@ async def get_business(
     Requires authenticated session.
     """
     if not current_user.active_business_id:
+        logger.warning(
+            f"User {current_user.id} attempted to get business info without active business"
+        )
         raise HTTPException(
             status_code=403,
             detail="User not associated with a business"
         )
+
+    logger.info(
+        f"User {current_user.id} retrieving business info for business {current_user.active_business_id}"
+    )
 
     business = db.query(Business).filter(
         Business.id == current_user.active_business_id
     ).first()
 
     if not business:
+        logger.warning(
+            f"Business {current_user.active_business_id} not found for user {current_user.id}"
+        )
         raise HTTPException(
             status_code=404,
             detail="Business not found"
         )
+
+    logger.debug(f"Retrieved business info - Business ID: {business.id}")
 
     return business
 
@@ -156,6 +169,9 @@ async def update_business(
     Requires authenticated session.
     """
     if not current_user.active_business_id:
+        logger.warning(
+            f"User {current_user.id} attempted to update business without active business"
+        )
         raise HTTPException(
             status_code=403,
             detail="User not associated with a business"
@@ -167,6 +183,9 @@ async def update_business(
     ).first()
 
     if not business:
+        logger.warning(
+            f"Business {current_user.active_business_id} not found for update by user {current_user.id}"
+        )
         raise HTTPException(
             status_code=404,
             detail="Business not found"
@@ -179,14 +198,17 @@ async def update_business(
     deprecated_found = check_deprecated_fields(update_data)
     if deprecated_found:
         logger.warning(
-            f"Deprecated fields in update attempt for business {business.id}: {deprecated_found}. "
-            f"Use dedicated endpoints for Services and Documents."
+            f"User {current_user.id} attempted to update deprecated fields for business {business.id}: "
+            f"{deprecated_found}. Use dedicated endpoints for Services and Documents."
         )
         # Remove deprecated fields from update
         for field in deprecated_found:
             update_data.pop(field, None)
 
     if not update_data:
+        logger.warning(
+            f"User {current_user.id} update attempt contained no valid fields for business {business.id}"
+        )
         raise HTTPException(
             status_code=400,
             detail="No valid fields to update (deprecated fields ignored)"
@@ -197,6 +219,9 @@ async def update_business(
 
     if not changed_fields:
         # Nothing actually changed
+        logger.info(
+            f"User {current_user.id} update request for business {business.id} resulted in no actual changes"
+        )
         return BusinessUpdateResponse(
             success=True,
             business=BusinessResponse.model_validate(business),
@@ -207,7 +232,10 @@ async def update_business(
             )
         )
 
-    logger.info(f"Updating business {business.id}: {changed_fields}")
+    logger.info(
+        f"User {current_user.id} updating business {business.id} - "
+        f"Changed fields: {', '.join(changed_fields)}"
+    )
 
     # Apply updates
     for field, value in update_data.items():
@@ -218,9 +246,13 @@ async def update_business(
     try:
         db.commit()
         db.refresh(business)
+        logger.info(f"Business {business.id} updated successfully")
     except Exception as e:
         db.rollback()
-        logger.error(f"Error saving business: {e}")
+        logger.error(
+            f"Error saving business {business.id} for user {current_user.id}: {e}",
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update business: {str(e)}"
@@ -232,7 +264,10 @@ async def update_business(
     reindex_result = ReindexResult(triggered=False)
 
     if needs_reindex:
-        logger.info(f"Knowledge fields changed, triggering reindex: {changed_fields}")
+        logger.info(
+            f"Knowledge fields changed for business {business.id}, triggering reindex - "
+            f"Fields: {', '.join([f for f in changed_fields if f in KNOWLEDGE_FIELDS])}"
+        )
 
         start_time = time.time()
 
@@ -256,10 +291,16 @@ async def update_business(
                 message=result.get("message")
             )
 
-            logger.info(f"Reindex completed: {result['indexed_count']} chunks in {duration_ms:.0f}ms")
+            logger.info(
+                f"Auto-reindex completed for business {business.id} - "
+                f"Indexed {result['indexed_count']} chunks in {duration_ms:.0f}ms"
+            )
 
         except Exception as e:
-            logger.error(f"Error reindexing knowledge: {e}", exc_info=True)
+            logger.error(
+                f"Error reindexing knowledge for business {business.id}: {e}",
+                exc_info=True
+            )
             reindex_result = ReindexResult(
                 triggered=True,
                 success=False,
@@ -303,6 +344,9 @@ async def reindex_knowledge(
     Requires authenticated session.
     """
     if not current_user.active_business_id:
+        logger.warning(
+            f"User {current_user.id} attempted manual reindex without active business"
+        )
         raise HTTPException(
             status_code=403,
             detail="User not associated with a business"
@@ -313,12 +357,18 @@ async def reindex_knowledge(
     ).first()
 
     if not business:
+        logger.warning(
+            f"Business {current_user.active_business_id} not found for manual reindex by user {current_user.id}"
+        )
         raise HTTPException(
             status_code=404,
             detail="Business not found"
         )
 
-    logger.info(f"Manual reindex triggered for business {business.id} (force={force})")
+    logger.info(
+        f"User {current_user.id} triggered MANUAL reindex for business {business.id} - "
+        f"Force: {force}"
+    )
 
     start_time = time.time()
 
@@ -335,10 +385,19 @@ async def reindex_knowledge(
         duration_ms = (time.time() - start_time) * 1000
 
         if not result["success"]:
+            logger.error(
+                f"Manual reindex failed for business {business.id} - "
+                f"Message: {result.get('message', 'Unknown error')}"
+            )
             raise HTTPException(
                 status_code=500,
                 detail=result.get("message", "Reindexing failed")
             )
+
+        logger.info(
+            f"Manual reindex completed for business {business.id} - "
+            f"Indexed {result['indexed_count']} chunks in {duration_ms:.0f}ms"
+        )
 
         return ManualReindexResponse(
             success=True,
@@ -351,7 +410,10 @@ async def reindex_knowledge(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error during manual reindex: {e}", exc_info=True)
+        logger.error(
+            f"Error during manual reindex for business {business.id}: {e}",
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Reindexing failed: {str(e)}"
@@ -371,6 +433,9 @@ async def get_knowledge_stats(
     Get statistics about indexed knowledge for your business.
     """
     if not current_user.active_business_id:
+        logger.warning(
+            f"User {current_user.id} attempted to get knowledge stats without active business"
+        )
         raise HTTPException(
             status_code=403,
             detail="User not associated with a business"
@@ -381,10 +446,17 @@ async def get_knowledge_stats(
     ).first()
 
     if not business:
+        logger.warning(
+            f"Business {current_user.active_business_id} not found for knowledge stats by user {current_user.id}"
+        )
         raise HTTPException(
             status_code=404,
             detail="Business not found"
         )
+
+    logger.info(
+        f"User {current_user.id} requesting knowledge stats for business {business.id}"
+    )
 
     try:
         rag_service = RAGService()
@@ -395,6 +467,7 @@ async def get_knowledge_stats(
         )
 
         if not stats["success"]:
+            logger.error(f"Failed to retrieve knowledge stats for business {business.id}")
             raise HTTPException(
                 status_code=500,
                 detail="Failed to retrieve knowledge statistics"
@@ -412,6 +485,12 @@ async def get_knowledge_stats(
 
         last_indexed = latest_chunk.created_at if latest_chunk else None
 
+        logger.info(
+            f"Knowledge stats retrieved for business {business.id} - "
+            f"Total chunks: {stats['total_chunks']}, "
+            f"Last indexed: {last_indexed.isoformat() if last_indexed else 'Never'}"
+        )
+
         return KnowledgeStatsResponse(
             success=True,
             total_chunks=stats["total_chunks"],
@@ -423,7 +502,10 @@ async def get_knowledge_stats(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting knowledge stats: {e}", exc_info=True)
+        logger.error(
+            f"Error getting knowledge stats for business {business.id}: {e}",
+            exc_info=True
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Failed to get statistics: {str(e)}"

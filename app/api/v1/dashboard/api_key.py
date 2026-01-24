@@ -18,7 +18,9 @@ from app.schemas.api_key import (
 )
 from app.api.dependencies import require_business_owner, require_business_member
 from app.models.auth.user import User
+from app.utils.logger import get_logger
 
+logger = get_logger(__name__)
 router = APIRouter(tags=["api-keys"])
 
 # Available scopes that users can assign to API keys
@@ -75,6 +77,7 @@ async def list_available_scopes(
         current_user: User = Depends(require_business_member),
 ):
     """Get list of all available API key scopes"""
+    logger.info(f"User {current_user.id} listing available API key scopes")
     return AVAILABLE_SCOPES
 
 
@@ -91,9 +94,15 @@ async def create_api_key(
     """
     business_id = get_business_id(current_user)
 
+    logger.info(
+        f"User {current_user.id} creating API key for business {business_id} - "
+        f"Name: '{api_key_data.name}', Scopes: {api_key_data.scopes}"
+    )
+
     # Validate scopes
     for scope in api_key_data.scopes:
         if scope not in AVAILABLE_SCOPES:
+            logger.warning(f"Invalid scope attempted: {scope}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid scope: {scope}. Available scopes: {AVAILABLE_SCOPES}"
@@ -124,6 +133,11 @@ async def create_api_key(
     db.add(api_key)
     db.commit()
     db.refresh(api_key)
+
+    logger.info(
+        f"API key {api_key.id} created successfully - Prefix: {key_prefix}, "
+        f"Expires: {expires_at.isoformat() if expires_at else 'Never'}"
+    )
 
     # Return response with full key (only time it's shown)
     return APIKeyWithSecretResponse(
@@ -156,12 +170,17 @@ async def list_api_keys(
     """List all API keys for the current business"""
     business_id = get_business_id(current_user)
 
+    filter_str = " (including revoked)" if include_revoked else " (active only)"
+    logger.info(f"User {current_user.id} listing API keys for business {business_id}{filter_str}")
+
     query = db.query(APIKey).filter(APIKey.business_id == business_id)
 
     if not include_revoked:
         query = query.filter(APIKey.revoked_at.is_(None))
 
     api_keys = query.order_by(desc(APIKey.created_at)).all()
+
+    logger.info(f"Returning {len(api_keys)} API keys")
 
     return api_keys
 
@@ -175,16 +194,24 @@ async def get_api_key(
     """Get a specific API key"""
     business_id = get_business_id(current_user)
 
+    logger.info(f"User {current_user.id} viewing API key {api_key_id}")
+
     api_key = db.query(APIKey).filter(
         APIKey.id == api_key_id,
         APIKey.business_id == business_id
     ).first()
 
     if not api_key:
+        logger.warning(f"API key {api_key_id} not found for business {business_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="API key not found"
         )
+
+    logger.debug(
+        f"Retrieved API key - Prefix: {api_key.key_prefix}, Active: {api_key.is_active}, "
+        f"Usage: {api_key.usage_count}"
+    )
 
     return api_key
 
@@ -199,12 +226,31 @@ async def update_api_key(
     """Update an API key's metadata and settings. Requires business owner role."""
     business_id = get_business_id(current_user)
 
+    # Build update description for logging
+    updates = []
+    update_data = api_key_data.model_dump(exclude_unset=True)
+    for field in update_data.keys():
+        if field == 'scopes':
+            updates.append(f"scopes={update_data[field]}")
+        elif field == 'is_active':
+            updates.append(f"is_active={update_data[field]}")
+        elif field == 'rate_limit':
+            updates.append(f"rate_limit={update_data[field]}")
+        elif field == 'allowed_ips':
+            updates.append("allowed_ips")
+        else:
+            updates.append(field)
+
+    update_str = ', '.join(updates) if updates else "no changes"
+    logger.info(f"User {current_user.id} updating API key {api_key_id} - Updates: {update_str}")
+
     api_key = db.query(APIKey).filter(
         APIKey.id == api_key_id,
         APIKey.business_id == business_id
     ).first()
 
     if not api_key:
+        logger.warning(f"Update failed - API key {api_key_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="API key not found"
@@ -214,6 +260,7 @@ async def update_api_key(
     if api_key_data.scopes is not None:
         for scope in api_key_data.scopes:
             if scope not in AVAILABLE_SCOPES:
+                logger.warning(f"Invalid scope in update: {scope}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid scope: {scope}"
@@ -227,6 +274,8 @@ async def update_api_key(
     db.commit()
     db.refresh(api_key)
 
+    logger.info(f"API key {api_key_id} updated successfully")
+
     return api_key
 
 
@@ -239,19 +288,31 @@ async def delete_api_key(
     """Permanently delete an API key. Requires business owner role."""
     business_id = get_business_id(current_user)
 
+    logger.warning(f"User {current_user.id} attempting to DELETE API key {api_key_id}")
+
     api_key = db.query(APIKey).filter(
         APIKey.id == api_key_id,
         APIKey.business_id == business_id
     ).first()
 
     if not api_key:
+        logger.warning(f"Delete failed - API key {api_key_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="API key not found"
         )
 
+    key_name = api_key.name
+    key_prefix = api_key.key_prefix
+
     db.delete(api_key)
     db.commit()
+
+    logger.warning(
+        f"API key DELETED permanently - "
+        f"Key ID: {api_key_id}, Name: '{key_name}', Prefix: {key_prefix}, "
+        f"Business ID: {business_id}, Deleted by: {current_user.id}"
+    )
 
 
 @router.post("/{api_key_id}/revoke", response_model=APIKeyResponse)
@@ -267,18 +328,23 @@ async def revoke_api_key(
     """
     business_id = get_business_id(current_user)
 
+    reason_str = f" - Reason: {reason}" if reason else ""
+    logger.info(f"User {current_user.id} revoking API key {api_key_id}{reason_str}")
+
     api_key = db.query(APIKey).filter(
         APIKey.id == api_key_id,
         APIKey.business_id == business_id
     ).first()
 
     if not api_key:
+        logger.warning(f"Revoke failed - API key {api_key_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="API key not found"
         )
 
     if api_key.revoked_at:
+        logger.warning(f"Revoke failed - API key {api_key_id} already revoked")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="API key is already revoked"
@@ -290,6 +356,8 @@ async def revoke_api_key(
 
     db.commit()
     db.refresh(api_key)
+
+    logger.info(f"API key {api_key_id} revoked successfully - Prefix: {api_key.key_prefix}")
 
     return api_key
 
@@ -303,18 +371,22 @@ async def activate_api_key(
     """Reactivate a previously deactivated (but not revoked) API key. Requires business owner role."""
     business_id = get_business_id(current_user)
 
+    logger.info(f"User {current_user.id} activating API key {api_key_id}")
+
     api_key = db.query(APIKey).filter(
         APIKey.id == api_key_id,
         APIKey.business_id == business_id
     ).first()
 
     if not api_key:
+        logger.warning(f"Activate failed - API key {api_key_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="API key not found"
         )
 
     if api_key.revoked_at:
+        logger.warning(f"Activate failed - API key {api_key_id} is revoked")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot activate a revoked API key. Create a new one instead."
@@ -322,6 +394,7 @@ async def activate_api_key(
 
     # Check if expired
     if api_key.expires_at and api_key.expires_at < datetime.utcnow():
+        logger.warning(f"Activate failed - API key {api_key_id} is expired")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot activate an expired API key"
@@ -330,6 +403,8 @@ async def activate_api_key(
     api_key.is_active = True
     db.commit()
     db.refresh(api_key)
+
+    logger.info(f"API key {api_key_id} activated successfully - Prefix: {api_key.key_prefix}")
 
     return api_key
 
@@ -346,16 +421,21 @@ async def rotate_api_key(
     """
     business_id = get_business_id(current_user)
 
+    logger.warning(f"User {current_user.id} ROTATING API key {api_key_id} (possible compromise)")
+
     old_api_key = db.query(APIKey).filter(
         APIKey.id == api_key_id,
         APIKey.business_id == business_id
     ).first()
 
     if not old_api_key:
+        logger.warning(f"Rotate failed - API key {api_key_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="API key not found"
         )
+
+    old_prefix = old_api_key.key_prefix
 
     # Generate new key
     full_key, key_prefix, key_hash = generate_api_key()
@@ -367,6 +447,12 @@ async def rotate_api_key(
 
     db.commit()
     db.refresh(old_api_key)
+
+    logger.warning(
+        f"API key {api_key_id} ROTATED - "
+        f"Old prefix: {old_prefix}, New prefix: {key_prefix}, "
+        f"Rotated by: {current_user.id}"
+    )
 
     # Return response with new full key
     return APIKeyWithSecretResponse(
@@ -398,6 +484,8 @@ async def get_api_key_usage_stats(
     """Get usage statistics for all API keys in the current business"""
     business_id = get_business_id(current_user)
 
+    logger.info(f"User {current_user.id} requesting API key usage stats for business {business_id}")
+
     api_keys = db.query(APIKey).filter(
         APIKey.business_id == business_id,
         APIKey.revoked_at.is_(None)
@@ -406,6 +494,11 @@ async def get_api_key_usage_stats(
     total_keys = len(api_keys)
     active_keys = sum(1 for key in api_keys if key.is_active)
     total_usage = sum(key.usage_count for key in api_keys)
+
+    logger.info(
+        f"API key stats: {total_keys} total, {active_keys} active, "
+        f"{total_usage} total requests"
+    )
 
     return {
         "total_keys": total_keys,

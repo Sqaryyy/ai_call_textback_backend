@@ -1,6 +1,7 @@
 # app/config/celery_config.py
 """Celery configuration and task routing"""
 from celery import Celery
+from celery.schedules import crontab
 from kombu import Queue
 
 from app.config.settings import get_settings
@@ -28,6 +29,7 @@ def create_celery_app() -> Celery:
         # Task routing
         task_routes={
             "app.tasks.conversation_tasks.process_sms_message": {"queue": "conversations"},
+            "app.tasks.conversation_tasks.finalize_stale_soft_closes": {"queue": "maintenance"},
             "app.tasks.call_tasks.process_incoming_call": {"queue": "calls"},
             "app.tasks.appointment_tasks.*": {"queue": "appointments"},
             "app.tasks.calendar_tasks.*": {"queue": "appointments"},
@@ -55,6 +57,23 @@ def create_celery_app() -> Celery:
 
         # Fix deprecation warning for Celery 6+
         broker_connection_retry_on_startup=True,
+
+        # Periodic tasks (Celery Beat schedule)
+        beat_schedule={
+            'finalize-stale-soft-closes': {
+                'task': 'app.tasks.conversation_tasks.finalize_stale_soft_closes',
+                'schedule': crontab(hour=3, minute=0),  # Run daily at 3 AM UTC
+                'options': {
+                    'queue': 'maintenance',
+                    'expires': 3600,  # Task expires after 1 hour if not picked up
+                }
+            },
+            # Add more periodic tasks here as needed
+            # 'example-hourly-task': {
+            #     'task': 'app.tasks.maintenance_tasks.cleanup_old_data',
+            #     'schedule': crontab(minute=0),  # Every hour
+            # },
+        },
     )
 
     # Auto-discover tasks

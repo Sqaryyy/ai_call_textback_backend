@@ -1,11 +1,11 @@
 # ============================================================================
 # FILE: app/api/v1/admin/invites.py
-# Platform admin endpoints for creating invites for new business owners
+# Platform admin endpoints for creating invites for business owners
+# CRITICAL: Contains PII (email addresses)
 # ============================================================================
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from typing import List
 from uuid import UUID
 
 from app.api.dependencies import get_db, require_platform_admin
@@ -13,114 +13,16 @@ from app.services.invite.platform_invite_service import PlatformInviteService
 from app.models.auth.user import User
 from app.models.invite import Invite
 from app.config.settings import settings
-
-router = APIRouter(prefix="/admin/invites", tags=["Admin - Platform Invites"])
-
-
-# ============================================================================
-# Pydantic Schemas
-# ============================================================================
-
-class CreatePlatformInviteRequest(BaseModel):
-    """Request body for creating a platform invite."""
-    email: Optional[EmailStr] = Field(
-        None,
-        description="Specific email (optional, if None anyone can use the invite)"
-    )
-    max_uses: int = Field(
-        1,
-        ge=1,
-        le=100,
-        description="Maximum number of times the invite can be used"
-    )
-    expires_in_days: Optional[int] = Field(
-        7,
-        ge=1,
-        le=365,
-        description="Days until expiration (null = never expires)"
-    )
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "email": "newowner@example.com",
-                "max_uses": 1,
-                "expires_in_days": 7
-            }
-        }
-
-
-class PlatformInviteResponse(BaseModel):
-    """Response with platform invite details."""
-    id: str
-    token: str
-    email: Optional[str]
-    role: str
-    max_uses: int
-    used_count: int
-    is_active: bool
-    is_valid: bool
-    expires_at: Optional[str]
-    created_at: str
-    used_at: Optional[str]
-    invite_url: str
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "id": "550e8400-e29b-41d4-a716-446655440000",
-                "token": "abc123xyz789def456ghi012",
-                "email": "newowner@example.com",
-                "role": "owner",
-                "max_uses": 1,
-                "used_count": 0,
-                "is_active": True,
-                "is_valid": True,
-                "expires_at": "2025-10-26T12:00:00+00:00",
-                "created_at": "2025-10-19T12:00:00+00:00",
-                "used_at": None,
-                "invite_url": "http://localhost:3000/register?invite=abc123xyz789def456ghi012"
-            }
-        }
-
-
-class PlatformInviteStatsResponse(BaseModel):
-    """Response with platform invite statistics."""
-    total_invites: int
-    active_invites: int
-    valid_invites: int
-    used_invites: int
-    expired_invites: int
-    total_uses: int
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "total_invites": 25,
-                "active_invites": 18,
-                "valid_invites": 15,
-                "used_invites": 10,
-                "expired_invites": 7,
-                "total_uses": 12
-            }
-        }
-
-
-class ExtendInviteRequest(BaseModel):
-    """Request body for extending invite expiration."""
-    additional_days: int = Field(
-        ...,
-        ge=1,
-        le=365,
-        description="Number of days to add to expiration"
-    )
-
-
-class MessageResponse(BaseModel):
-    """Generic message response."""
-    message: str
-    details: Optional[dict] = None
-
+from app.utils.logger import get_logger
+from app.schemas.admin.invites import (
+    MessageResponse,
+    ExtendInviteRequest,
+    PlatformInviteResponse,
+    PlatformInviteStatsResponse,
+    CreatePlatformInviteRequest
+)
+logger = get_logger(__name__)
+router = APIRouter(prefix="/invites", tags=["Admin - Platform Invites"])
 
 # ============================================================================
 # Platform Invite Management Endpoints
@@ -138,6 +40,13 @@ async def create_platform_invite(
     Requires platform admin role. The invite will allow someone to register
     as a business owner on the platform.
     """
+    # Log action without email (PII)
+    invite_type = "email-specific" if request.email else "open"
+    logger.info(
+        f"Admin {current_user.id} creating platform invite - "
+        f"Type: {invite_type}, Max uses: {request.max_uses}, Expires in: {request.expires_in_days} days"
+    )
+
     try:
         invite = PlatformInviteService.create_platform_invite(
             db=db,
@@ -149,6 +58,8 @@ async def create_platform_invite(
 
         # Generate the invite URL
         invite_url = PlatformInviteService.get_invite_url(invite, settings.FRONTEND_URL)
+
+        logger.info(f"Platform invite {invite.id} created successfully by admin {current_user.id}")
 
         return PlatformInviteResponse(
             id=str(invite.id),
@@ -166,6 +77,7 @@ async def create_platform_invite(
         )
 
     except Exception as e:
+        logger.error(f"Error creating platform invite: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create platform invite: {str(e)}"
@@ -186,10 +98,15 @@ async def list_platform_invites(
 
     Requires platform admin role.
     """
+    filter_str = " (including inactive)" if include_inactive else " (active only)"
+    logger.info(f"Admin {current_user.id} listing platform invites{filter_str}")
+
     invites_data = PlatformInviteService.list_platform_invites(
         db=db,
         include_inactive=include_inactive
     )
+
+    logger.info(f"Returning {len(invites_data)} platform invites")
 
     return [
         PlatformInviteResponse(
@@ -210,7 +127,14 @@ async def get_platform_invite_stats(
 
     Requires platform admin role.
     """
+    logger.info(f"Admin {current_user.id} requesting platform invite stats")
+
     stats = PlatformInviteService.get_platform_invite_stats(db=db)
+
+    logger.info(
+        f"Invite stats: {stats['total_invites']} total, {stats['active_invites']} active, "
+        f"{stats['used_invites']} used, {stats['expired_invites']} expired"
+    )
 
     return PlatformInviteStatsResponse(**stats)
 
@@ -226,6 +150,8 @@ async def get_platform_invite(
 
     Requires platform admin role.
     """
+    logger.info(f"Admin {current_user.id} viewing platform invite {invite_id}")
+
     from app.models.invite import InviteType
 
     invite = db.query(Invite).filter(
@@ -234,13 +160,18 @@ async def get_platform_invite(
     ).first()
 
     if not invite:
+        logger.warning(f"Platform invite {invite_id} not found - requested by admin {current_user.id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Platform invite not found"
         )
 
-    invite_url = PlatformInviteService.get_invite_url(invite, settings.FRONTEND_URL)
+    logger.debug(
+        f"Retrieved invite - Role: {invite.role}, Active: {invite.is_active}, "
+        f"Used: {invite.used_count}/{invite.max_uses}"
+    )
 
+    invite_url = PlatformInviteService.get_invite_url(invite, settings.FRONTEND_URL)
 
     return PlatformInviteResponse(
         id=str(invite.id),
@@ -269,6 +200,8 @@ async def revoke_platform_invite(
 
     Requires platform admin role.
     """
+    logger.info(f"Admin {current_user.id} revoking platform invite {invite_id}")
+
     from app.models.invite import InviteType
 
     invite = db.query(Invite).filter(
@@ -277,12 +210,14 @@ async def revoke_platform_invite(
     ).first()
 
     if not invite:
+        logger.warning(f"Revoke failed - platform invite {invite_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Platform invite not found"
         )
 
     if not invite.is_active:
+        logger.warning(f"Revoke failed - invite {invite_id} already revoked")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invite is already revoked"
@@ -291,10 +226,13 @@ async def revoke_platform_invite(
     success = PlatformInviteService.revoke_platform_invite(db, invite_id)
 
     if not success:
+        logger.error(f"Failed to revoke platform invite {invite_id}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to revoke platform invite"
         )
+
+    logger.info(f"Platform invite {invite_id} revoked successfully by admin {current_user.id}")
 
     return MessageResponse(
         message="Platform invite revoked successfully",
@@ -317,6 +255,10 @@ async def extend_platform_invite_expiration(
 
     Requires platform admin role.
     """
+    logger.info(
+        f"Admin {current_user.id} extending platform invite {invite_id} expiration by {request.additional_days} days"
+    )
+
     from app.models.invite import InviteType
 
     invite = db.query(Invite).filter(
@@ -325,6 +267,7 @@ async def extend_platform_invite_expiration(
     ).first()
 
     if not invite:
+        logger.warning(f"Extend failed - platform invite {invite_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Platform invite not found"
@@ -337,10 +280,13 @@ async def extend_platform_invite_expiration(
     )
 
     if not updated_invite:
+        logger.error(f"Failed to extend platform invite {invite_id} expiration")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to extend platform invite expiration"
         )
+
+    logger.info(f"Platform invite {invite_id} expiration extended successfully")
 
     invite_url = PlatformInviteService.get_invite_url(updated_invite, settings.FRONTEND_URL)
 
@@ -371,6 +317,8 @@ async def delete_platform_invite(
 
     Requires platform admin role. This action cannot be undone.
     """
+    logger.warning(f"Admin {current_user.id} attempting to DELETE platform invite {invite_id}")
+
     from app.models.invite import InviteType
 
     invite = db.query(Invite).filter(
@@ -379,18 +327,29 @@ async def delete_platform_invite(
     ).first()
 
     if not invite:
+        logger.warning(f"Delete failed - platform invite {invite_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Platform invite not found"
         )
 
+    invite_token = invite.token
+    invite_role = invite.role
+
     success = PlatformInviteService.delete_platform_invite(db, invite_id)
 
     if not success:
+        logger.error(f"Failed to delete platform invite {invite_id}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete platform invite"
         )
+
+    logger.warning(
+        f"Platform invite DELETED permanently - "
+        f"Invite ID: {invite_id}, Role: {invite_role}, Token: {invite_token}, "
+        f"Deleted by: {current_user.id}"
+    )
 
     return MessageResponse(
         message="Platform invite deleted successfully",

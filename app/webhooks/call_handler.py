@@ -1,20 +1,23 @@
-# app/webhooks/call_handler.py - FIXED with DEBUG PRINTS
+# app/webhooks/call_handler.py - SECURED with signature validation
 """Incoming call webhook handler - queuing only"""
 import logging
-from fastapi import APIRouter, Request, HTTPException, Response
+from fastapi import APIRouter, Request, Response, Depends
 from app.schemas.webhook_events import TwilioCallWebhook
 from app.tasks.call_tasks import process_incoming_call
+from app.webhooks.security import validate_twilio_signature_dependency
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# ADD THIS AT MODULE LEVEL - Will print when file is imported
-print("🔥🔥🔥 call_handler.py MODULE LOADED 🔥🔥🔥")
 
-
-@router.post("/incoming")
+@router.post("/incoming", dependencies=[Depends(validate_twilio_signature_dependency)])
 async def handle_incoming_call(request: Request):
-    """Handle incoming call webhook - queue processing immediately"""
+    """
+    Handle incoming call webhook - queue processing immediately.
+
+    🔒 SECURITY: Twilio signature is validated by the dependency.
+    Only requests actually from Twilio will reach this handler.
+    """
     print("=" * 80)
     print("🔥 WEBHOOK HIT - START")
     print("=" * 80)
@@ -86,4 +89,5 @@ async def handle_incoming_call(request: Request):
         print(f"❌ Traceback:\n{traceback.format_exc()}")
         print("=" * 80)
         logger.error(f"Error handling call webhook: {str(e)}")
-        return Response(status_code=200)  # Always return 200 to Twilio
+        # Always return 200 to Twilio to prevent retries on our errors
+        return Response(status_code=200)

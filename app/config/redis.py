@@ -52,6 +52,7 @@ class RedisKeys:
     # Rate limiting
     RATE_LIMIT_SMS = "ratelimit:sms:{phone}:{minute}"
     RATE_LIMIT_CALLS = "ratelimit:calls:{phone}:{hour}"
+    RATE_LIMIT_API_KEY = "ratelimit:api_key:{api_key_id}:{second}"
 
     # Temporary data
     WEBHOOK_DEDUP = "webhook:{webhook_id}"

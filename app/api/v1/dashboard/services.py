@@ -1,119 +1,31 @@
-# app/api/routes/service_routes.py
 """
 Service Management API Endpoints
 Handles CRUD operations for business services
+UPDATED: Added comprehensive logging with user audit trail
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
 from decimal import Decimal
-from enum import Enum
 import uuid
-import logging
 
 from app.config.database import get_db
+from app.models.auth.user import User
+from app.api.dependencies import get_current_user
 from app.models.business.service import Service, BookingType
 from app.models.business.business import Business
+from app.schemas.service import (
+    BookingTypeEnum,
+    RequiredFieldSchema,
+    ServiceCreate,
+    ServiceUpdate,
+    ServiceResponse,
+    ServiceListResponse,
+    ServiceBulkCreate
+)
+from app.utils.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 router = APIRouter(tags=["services"])
-
-
-# ============================================================================
-# Request/Response Models
-# ============================================================================
-
-class BookingTypeEnum(str, Enum):
-    """Pydantic enum for booking types"""
-    DIRECT = "direct"
-    CONSULTATION_REQUIRED = "consultation_required"
-    LEAD_ONLY = "lead_only"
-
-
-class RequiredFieldSchema(BaseModel):
-    """Schema for required field definition"""
-    field: str = Field(..., description="Field name (e.g., 'budget', 'timeline')")
-    label: Optional[str] = Field(None, description="Display label for the field")
-    type: str = Field(default="text", description="Field type: text, select, multiselect, number, date")
-    required: bool = Field(default=True, description="Whether this field is required")
-    options: Optional[List[str]] = Field(None, description="Options for select/multiselect types")
-
-
-class ServiceCreate(BaseModel):
-    """Request model for creating a service"""
-    business_id: str
-    name: str = Field(..., min_length=1, max_length=200)
-    description: Optional[str] = None
-    price: Optional[float] = Field(None, ge=0)
-    price_display: Optional[str] = Field(None, max_length=50)
-    duration: Optional[int] = Field(None, ge=0,
-                                    description="Duration in minutes (optional if consultation_required or lead_only)")
-
-    # New booking fields
-    booking_type: BookingTypeEnum = Field(default=BookingTypeEnum.DIRECT)
-    consultation_duration: Optional[int] = Field(None, ge=5, description="Discovery call duration in minutes")
-    consultation_price: Optional[float] = Field(None, ge=0, description="Discovery call price (usually 0)")
-    required_fields: List[RequiredFieldSchema] = Field(default_factory=list,
-                                                       description="Fields that must be collected")
-
-    display_order: int = Field(default=0)
-
-
-class ServiceUpdate(BaseModel):
-    """Request model for updating a service"""
-    name: Optional[str] = Field(None, min_length=1, max_length=200)
-    description: Optional[str] = None
-    price: Optional[float] = Field(None, ge=0)
-    price_display: Optional[str] = Field(None, max_length=50)
-    duration: Optional[int] = Field(None, ge=0)
-
-    # New booking fields
-    booking_type: Optional[BookingTypeEnum] = None
-    consultation_duration: Optional[int] = Field(None, ge=5)
-    consultation_price: Optional[float] = Field(None, ge=0)
-    required_fields: Optional[List[RequiredFieldSchema]] = None
-
-    display_order: Optional[int] = None
-    is_active: Optional[bool] = None
-
-
-class ServiceResponse(BaseModel):
-    """Response model for service data"""
-    id: str
-    business_id: str
-    name: str
-    description: Optional[str]
-    price: Optional[float]
-    price_display: Optional[str]
-    formatted_price: str
-    duration: Optional[int]
-    formatted_duration: str
-
-    # New booking fields
-    booking_type: str
-    consultation_duration: Optional[int]
-    consultation_price: Optional[float]
-    formatted_consultation_duration: Optional[str]
-    required_fields: List[Dict[str, Any]]
-
-    is_active: bool
-    display_order: int
-    created_at: str
-    updated_at: str
-    linked_documents_count: int = 0
-
-
-class ServiceListResponse(BaseModel):
-    """Response model for service list"""
-    total: int
-    services: List[ServiceResponse]
-
-
-class ServiceBulkCreate(BaseModel):
-    """Request model for bulk service creation"""
-    business_id: str
-    services: List[ServiceCreate]
 
 
 # ============================================================================
@@ -146,22 +58,38 @@ def _service_to_response(service: Service, db: Session) -> ServiceResponse:
 @router.post("/", response_model=ServiceResponse)
 def create_service(
         service_data: ServiceCreate,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Create a new service
+    Requires authenticated session.
     """
+    logger.info(
+        f"User {current_user.id} creating service - "
+        f"Business: {service_data.business_id}, Name: '{service_data.name}', "
+        f"Type: {service_data.booking_type.value}"
+    )
+
     try:
         # Validate business exists
         business = db.query(Business).filter(
             Business.id == service_data.business_id
         ).first()
         if not business:
+            logger.warning(
+                f"Service creation failed: Business {service_data.business_id} not found - "
+                f"User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Business not found")
 
         # Validation: consultation_required needs consultation_duration
         if service_data.booking_type == BookingTypeEnum.CONSULTATION_REQUIRED:
             if not service_data.consultation_duration:
+                logger.warning(
+                    f"Service creation failed: Missing consultation_duration for CONSULTATION_REQUIRED - "
+                    f"Service: '{service_data.name}', User: {current_user.id}"
+                )
                 raise HTTPException(
                     status_code=400,
                     detail="consultation_duration is required when booking_type is consultation_required"
@@ -192,14 +120,24 @@ def create_service(
         db.commit()
         db.refresh(service)
 
-        logger.info(f"Created service {service.id}: {service.name} (booking_type: {service.booking_type.value})")
+        logger.info(
+            f"Service created successfully - "
+            f"Service ID: {service.id}, Name: '{service.name}', "
+            f"Type: {service.booking_type.value}, Duration: {service.duration}min, "
+            f"Required fields: {len(required_fields_data)}, Business: {service_data.business_id}, "
+            f"Created by: {current_user.id}"
+        )
 
         return _service_to_response(service, db)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating service: {e}", exc_info=True)
+        logger.error(
+            f"Error creating service - Business: {service_data.business_id}, "
+            f"User: {current_user.id}: {e}",
+            exc_info=True
+        )
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -207,17 +145,28 @@ def create_service(
 @router.post("/bulk", response_model=ServiceListResponse)
 def create_services_bulk(
         bulk_data: ServiceBulkCreate,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Create multiple services at once (useful for initial setup)
+    Requires authenticated session.
     """
+    logger.info(
+        f"User {current_user.id} bulk creating services - "
+        f"Business: {bulk_data.business_id}, Count: {len(bulk_data.services)}"
+    )
+
     try:
         # Validate business exists
         business = db.query(Business).filter(
             Business.id == bulk_data.business_id
         ).first()
         if not business:
+            logger.warning(
+                f"Bulk service creation failed: Business {bulk_data.business_id} not found - "
+                f"User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Business not found")
 
         created_services = []
@@ -226,6 +175,10 @@ def create_services_bulk(
             # Validation
             if service_data.booking_type == BookingTypeEnum.CONSULTATION_REQUIRED:
                 if not service_data.consultation_duration:
+                    logger.warning(
+                        f"Bulk creation failed: Missing consultation_duration for '{service_data.name}' - "
+                        f"User: {current_user.id}"
+                    )
                     raise HTTPException(
                         status_code=400,
                         detail=f"consultation_duration required for service '{service_data.name}'"
@@ -255,7 +208,14 @@ def create_services_bulk(
 
         db.commit()
 
-        logger.info(f"Bulk created {len(created_services)} services for business {bulk_data.business_id}")
+        # Log each service name for audit
+        service_names = [s.name for s in created_services]
+        logger.info(
+            f"Bulk created {len(created_services)} services - "
+            f"Business: {bulk_data.business_id}, "
+            f"Services: {', '.join(service_names[:5])}{'...' if len(service_names) > 5 else ''}, "
+            f"Created by: {current_user.id}"
+        )
 
         # Refresh all services
         for service in created_services:
@@ -269,7 +229,11 @@ def create_services_bulk(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in bulk service creation: {e}", exc_info=True)
+        logger.error(
+            f"Error in bulk service creation - Business: {bulk_data.business_id}, "
+            f"User: {current_user.id}: {e}",
+            exc_info=True
+        )
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -277,22 +241,37 @@ def create_services_bulk(
 @router.get("/{service_id}", response_model=ServiceResponse)
 def get_service(
         service_id: str,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Get service by ID
+    Requires authenticated session.
     """
+    logger.info(f"User {current_user.id} requesting service {service_id}")
+
     try:
         service = db.query(Service).filter(Service.id == service_id).first()
         if not service:
+            logger.warning(
+                f"Service {service_id} not found - User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Service not found")
+
+        logger.info(
+            f"Service retrieved - Service: {service_id}, Name: '{service.name}', "
+            f"Type: {service.booking_type.value}"
+        )
 
         return _service_to_response(service, db)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching service: {e}")
+        logger.error(
+            f"Error fetching service {service_id} - User: {current_user.id}: {e}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -301,11 +280,18 @@ def list_business_services(
         business_id: str,
         active_only: bool = True,
         include_inactive: bool = False,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     List all services for a business
+    Requires authenticated session.
     """
+    logger.info(
+        f"User {current_user.id} listing services for business {business_id} - "
+        f"Active only: {active_only}, Include inactive: {include_inactive}"
+    )
+
     try:
         query = db.query(Service).filter(Service.business_id == business_id)
 
@@ -314,13 +300,20 @@ def list_business_services(
 
         services = query.order_by(Service.display_order, Service.created_at).all()
 
+        logger.info(
+            f"Returned {len(services)} services for business {business_id}"
+        )
+
         return ServiceListResponse(
             total=len(services),
             services=[_service_to_response(s, db) for s in services]
         )
 
     except Exception as e:
-        logger.error(f"Error listing services: {e}")
+        logger.error(
+            f"Error listing services - Business: {business_id}, User: {current_user.id}: {e}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -328,69 +321,99 @@ def list_business_services(
 def update_service(
         service_id: str,
         update_data: ServiceUpdate,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Update a service
+    Requires authenticated session.
     """
+    logger.info(f"User {current_user.id} updating service {service_id}")
+
     try:
         service = db.query(Service).filter(Service.id == service_id).first()
         if not service:
+            logger.warning(
+                f"Service update failed: Service {service_id} not found - User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Service not found")
+
+        # Track changes
+        changes = []
 
         # Update fields if provided
         if update_data.name is not None:
+            changes.append(f"name: '{service.name}' -> '{update_data.name}'")
             service.name = update_data.name
 
         if update_data.description is not None:
+            changes.append("description updated")
             service.description = update_data.description
 
         if update_data.price is not None:
+            changes.append(f"price: {service.price} -> {update_data.price}")
             service.price = Decimal(str(update_data.price))
 
         if update_data.price_display is not None:
             service.price_display = update_data.price_display
 
         if update_data.duration is not None:
+            changes.append(f"duration: {service.duration}min -> {update_data.duration}min")
             service.duration = update_data.duration
 
         if update_data.booking_type is not None:
+            changes.append(f"booking_type: {service.booking_type.value} -> {update_data.booking_type.value}")
             service.booking_type = BookingType[update_data.booking_type.name]
 
             # Validate consultation_duration when switching to consultation_required
             if update_data.booking_type == BookingTypeEnum.CONSULTATION_REQUIRED:
                 if not service.consultation_duration and not update_data.consultation_duration:
+                    logger.warning(
+                        f"Service update failed: Missing consultation_duration for CONSULTATION_REQUIRED - "
+                        f"Service: {service_id}, User: {current_user.id}"
+                    )
                     raise HTTPException(
                         status_code=400,
                         detail="consultation_duration required when booking_type is consultation_required"
                     )
 
         if update_data.consultation_duration is not None:
+            changes.append(f"consultation_duration: {service.consultation_duration}min -> {update_data.consultation_duration}min")
             service.consultation_duration = update_data.consultation_duration
 
         if update_data.consultation_price is not None:
             service.consultation_price = Decimal(str(update_data.consultation_price))
 
         if update_data.required_fields is not None:
+            changes.append(f"required_fields: {len(update_data.required_fields)} fields")
             service.required_fields = [field.dict() for field in update_data.required_fields]
 
         if update_data.display_order is not None:
+            changes.append(f"display_order: {service.display_order} -> {update_data.display_order}")
             service.display_order = update_data.display_order
 
         if update_data.is_active is not None:
+            changes.append(f"is_active: {service.is_active} -> {update_data.is_active}")
             service.is_active = update_data.is_active
 
         db.commit()
         db.refresh(service)
 
-        logger.info(f"Updated service {service_id}")
+        logger.info(
+            f"Service updated - Service: {service_id}, "
+            f"Changes: [{', '.join(changes) if changes else 'no changes'}], "
+            f"Updated by: {current_user.id}"
+        )
 
         return _service_to_response(service, db)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating service: {e}", exc_info=True)
+        logger.error(
+            f"Error updating service {service_id} - User: {current_user.id}: {e}",
+            exc_info=True
+        )
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -399,18 +422,28 @@ def update_service(
 def delete_service(
         service_id: str,
         hard_delete: bool = False,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Delete a service
+    Requires authenticated session.
 
     Args:
         service_id: Service to delete
         hard_delete: If True, permanently delete. If False, soft delete (set is_active=False)
     """
+    delete_type = "HARD DELETE" if hard_delete else "soft delete"
+    logger.warning(
+        f"User {current_user.id} performing {delete_type} on service {service_id}"
+    )
+
     try:
         service = db.query(Service).filter(Service.id == service_id).first()
         if not service:
+            logger.warning(
+                f"Service deletion failed: Service {service_id} not found - User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Service not found")
 
         # Check if service has linked documents
@@ -420,8 +453,15 @@ def delete_service(
             Document.is_active == True
         ).count()
 
+        service_name = service.name
+        business_id = service.business_id
+
         if hard_delete:
             if linked_docs_count > 0:
+                logger.warning(
+                    f"Hard delete blocked: Service {service_id} has {linked_docs_count} linked documents - "
+                    f"User: {current_user.id}"
+                )
                 raise HTTPException(
                     status_code=400,
                     detail=f"Cannot hard delete service with {linked_docs_count} linked documents. "
@@ -432,7 +472,12 @@ def delete_service(
             db.delete(service)
             db.commit()
 
-            logger.info(f"Hard deleted service {service_id}")
+            logger.warning(
+                f"Service PERMANENTLY DELETED - "
+                f"Service ID: {service_id}, Name: '{service_name}', "
+                f"Business: {business_id}, Deleted by: {current_user.id}"
+            )
+
             return {
                 "success": True,
                 "message": "Service permanently deleted"
@@ -442,7 +487,13 @@ def delete_service(
             service.is_active = False
             db.commit()
 
-            logger.info(f"Soft deleted service {service_id}")
+            logger.warning(
+                f"Service DEACTIVATED - "
+                f"Service ID: {service_id}, Name: '{service_name}', "
+                f"Business: {business_id}, Linked documents: {linked_docs_count}, "
+                f"Deactivated by: {current_user.id}"
+            )
+
             return {
                 "success": True,
                 "message": "Service deactivated",
@@ -452,7 +503,10 @@ def delete_service(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting service: {e}")
+        logger.error(
+            f"Error deleting service {service_id} - User: {current_user.id}: {e}",
+            exc_info=True
+        )
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -461,21 +515,33 @@ def delete_service(
 def reorder_service(
         service_id: str,
         new_order: int,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Update the display order of a service
+    Requires authenticated session.
     """
+    logger.info(
+        f"User {current_user.id} reordering service {service_id} to position {new_order}"
+    )
+
     try:
         service = db.query(Service).filter(Service.id == service_id).first()
         if not service:
+            logger.warning(
+                f"Service reorder failed: Service {service_id} not found - User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Service not found")
 
         old_order = service.display_order
         service.display_order = new_order
         db.commit()
 
-        logger.info(f"Reordered service {service_id} from {old_order} to {new_order}")
+        logger.info(
+            f"Service reordered - Service: {service_id}, Name: '{service.name}', "
+            f"Order: {old_order} -> {new_order}, Updated by: {current_user.id}"
+        )
 
         return {
             "success": True,
@@ -487,7 +553,10 @@ def reorder_service(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error reordering service: {e}")
+        logger.error(
+            f"Error reordering service {service_id} - User: {current_user.id}: {e}",
+            exc_info=True
+        )
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -496,17 +565,27 @@ def reorder_service(
 def get_service_documents(
         service_id: str,
         active_only: bool = True,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Get all documents linked to a service
+    Requires authenticated session.
     """
+    logger.info(
+        f"User {current_user.id} requesting documents for service {service_id} - "
+        f"Active only: {active_only}"
+    )
+
     try:
         from app.models.business.document import Document
 
         # Verify service exists
         service = db.query(Service).filter(Service.id == service_id).first()
         if not service:
+            logger.warning(
+                f"Service {service_id} not found - User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Service not found")
 
         query = db.query(Document).filter(Document.related_service_id == service_id)
@@ -515,6 +594,10 @@ def get_service_documents(
             query = query.filter(Document.is_active == True)
 
         documents = query.order_by(Document.created_at.desc()).all()
+
+        logger.info(
+            f"Retrieved {len(documents)} documents for service {service_id}"
+        )
 
         return {
             "service_id": service_id,
@@ -526,25 +609,40 @@ def get_service_documents(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching service documents: {e}")
+        logger.error(
+            f"Error fetching service documents - Service: {service_id}, User: {current_user.id}: {e}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/migrate-from-catalog/{business_id}")
 def migrate_from_service_catalog(
         business_id: str,
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     Migrate services from old Business.service_catalog JSON to Services table
     (Helper endpoint for manual migration if needed)
+    Requires authenticated session.
     """
+    logger.warning(
+        f"User {current_user.id} initiating service catalog MIGRATION for business {business_id}"
+    )
+
     try:
         business = db.query(Business).filter(Business.id == business_id).first()
         if not business:
+            logger.warning(
+                f"Migration failed: Business {business_id} not found - User: {current_user.id}"
+            )
             raise HTTPException(status_code=404, detail="Business not found")
 
         if not business.service_catalog:
+            logger.info(
+                f"No service catalog to migrate for business {business_id}"
+            )
             return {
                 "success": True,
                 "message": "No service_catalog to migrate",
@@ -557,6 +655,10 @@ def migrate_from_service_catalog(
         ).count()
 
         if existing_count > 0:
+            logger.warning(
+                f"Migration blocked: Business {business_id} already has {existing_count} services - "
+                f"User: {current_user.id}"
+            )
             raise HTTPException(
                 status_code=400,
                 detail=f"Business already has {existing_count} services. Delete them first if you want to re-migrate."
@@ -598,7 +700,10 @@ def migrate_from_service_catalog(
 
         db.commit()
 
-        logger.info(f"Migrated {migrated_count} services from service_catalog for business {business_id}")
+        logger.warning(
+            f"Service catalog MIGRATED - Business: {business_id}, "
+            f"Services migrated: {migrated_count}, Migrated by: {current_user.id}"
+        )
 
         return {
             "success": True,
@@ -609,22 +714,31 @@ def migrate_from_service_catalog(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error migrating services: {e}", exc_info=True)
+        logger.error(
+            f"Error migrating services - Business: {business_id}, User: {current_user.id}: {e}",
+            exc_info=True
+        )
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/", response_model=ServiceListResponse)
 def list_all_services(
+        current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
 ):
     """
     List all active services
+    Requires authenticated session.
     """
+    logger.info(f"User {current_user.id} listing all active services")
+
     try:
         services = db.query(Service).filter(
             Service.is_active == True
         ).order_by(Service.display_order, Service.created_at).all()
+
+        logger.info(f"Returned {len(services)} active services")
 
         return ServiceListResponse(
             total=len(services),
@@ -632,5 +746,8 @@ def list_all_services(
         )
 
     except Exception as e:
-        logger.error(f"Error listing services: {e}")
+        logger.error(
+            f"Error listing all services - User: {current_user.id}: {e}",
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=str(e))

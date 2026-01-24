@@ -5,11 +5,9 @@ Organized into: public, dashboard (JWT), api_key, and admin routes
 from fastapi import APIRouter
 
 # Existing routes
-from app.api.v1 import metrics
-from app.api.v1.dashboard import onboarding, api_key, conversations, invites as BizInvites, business, calendar,business_onboarding,services,documents,demo as dashboard_demo,webhook
+from app.api.v1.dashboard import dashboard_router
 from app.api.v1.public import demo2 as demo, auth
-from app.api.v1.admin import invites
-
+from app.api.v1.admin import admin_router
 api_v1_router = APIRouter()
 
 print(f"Demo router loaded: {demo.router}")
@@ -29,83 +27,17 @@ api_v1_router.include_router(
     tags=["Authentication"]
 )
 
-# ============================================================================
 # DASHBOARD ROUTES (JWT authentication required)
-# ============================================================================
-api_v1_router.include_router(
-    conversations.router,
-    prefix="/dashboard",  # ← Just /dashboard
-    tags=["Dashboard"]
-)
-api_v1_router.include_router(
-    api_key.router,
-    prefix="/dashboard/api-keys",  # ← Just /dashboard
-    tags=["Dashboard"]
-)
-api_v1_router.include_router(
-    webhook.router,
-    prefix="/dashboard/webhooks",  # ← Just /dashboard
-    tags=["Dashboard"]
-)
-api_v1_router.include_router(
-    onboarding.router,
-    prefix="/dashboard/onboarding",
-    tags=["Dashboard"]
-)
-api_v1_router.include_router(
-    business_onboarding.router,
-    prefix="/dashboard/businesses",  # ← Use this for the new onboarding endpoints
-    tags=["Business Onboarding"]
-)
-api_v1_router.include_router(
-    dashboard_demo.router,
-    prefix="/dashboard/demo",  # ← Use this for the new onboarding endpoints
-    tags=["Business Demo"]
-)
-api_v1_router.include_router(
-    business.router,
-    prefix="/dashboard/business",
-    tags=["Dashboard"]
-)
-api_v1_router.include_router(
-    services.router,
-    prefix="/dashboard/services",
-    tags=["Dashboard"]
-)
-api_v1_router.include_router(
-    documents.router,
-    prefix="/dashboard/documents",
-    tags=["Dashboard"]
-)
-api_v1_router.include_router(BizInvites.router,
-    prefix="/dashboard/business-invites",
-    tags=["Dashboard"]
-)
+api_v1_router.include_router(dashboard_router)
 
-api_v1_router.include_router(
-    calendar.router,
-    prefix="/dashboard/calendar",
-    tags=["Dashboard"]
-)
-# ============================================================================
 # ADMIN ROUTES (JWT authentication + admin role required)
-# ============================================================================
-api_v1_router.include_router(
-    invites.router,
-    # No prefix needed - invites.router already has "/admin/invites" prefix
-    tags=["Admin"]
-)
+api_v1_router.include_router(admin_router)
 
 # ============================================================================
 # API KEY ROUTES (API key authentication required)
 # ============================================================================
 # These routes require API key authentication (for webhooks, integrations)
 
-api_v1_router.include_router(
-    metrics.router,
-    prefix="/metrics",
-    tags=["API Key - Metrics"]
-)
 
 # ============================================================================
 # ROOT ENDPOINT - API Info

@@ -5,7 +5,6 @@ from datetime import datetime
 from app.models.base import Base
 import uuid
 
-
 class CalendarIntegration(Base):
     __tablename__ = "calendar_integrations"
 

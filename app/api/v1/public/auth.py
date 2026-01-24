@@ -1,7 +1,7 @@
 # ============================================================================
-# FILE: app/api/v1/auth.py
+# FILE: app/api/v1/public/auth.py
 # Public authentication endpoints - login, register, verify, password reset
-# MODIFIED: Now uses httpOnly cookies instead of returning tokens in response
+# MODIFIED: Uses unified logger instead of print(), sanitizes sensitive data
 # ============================================================================
 import uuid
 
@@ -35,6 +35,11 @@ from app.models.auth.email_verification import EmailVerification
 from app.models.auth.password_reset import PasswordReset
 from app.models.auth.user import user_business_association
 from app.services.business.business_service import BusinessService
+
+# Import unified logger
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -120,6 +125,7 @@ class TokenResponse(BaseModel):
     full_name: Optional[str] = None
     active_business_id: Optional[str] = None
     is_verified: bool = False
+    role: str  # platform role (admin/user)
 
 
 class VerifyEmailRequest(BaseModel):
@@ -173,10 +179,7 @@ async def register(
     Register a new user with an invite token.
     Sets httpOnly cookies for authentication.
     """
-    print("\n" + "=" * 80)
-    print("=== REGISTRATION START ===")
-    print(f"Email: {request.email}")
-    print(f"Invite token: {request.invite_token[:20]}...")
+    logger.info("Registration attempt started")
 
     # Validate the invite token (auto-detects type)
     is_valid, error_msg, invite = InviteService.validate_invite(
@@ -186,77 +189,57 @@ async def register(
     )
 
     if not is_valid:
-        print(f"ERROR: Invite validation failed: {error_msg}")
+        logger.warning(f"Registration failed: Invalid invite - {error_msg}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=error_msg or "Invalid invite token"
         )
 
     if not invite:
-        print("ERROR: Invite not found after validation")
+        logger.error("Registration failed: Invite not found after validation")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invite not found"
         )
 
-    print(f"\n✓ Invite validated successfully")
-    print(f"  - Invite ID: {invite.id}")
-    print(f"  - Invite type: {invite.invite_type}")
-    print(f"  - Invite role: {invite.role}")
-    print(f"  - Invite role type: {type(invite.role)}")
-    print(f"  - Invite role repr: {repr(invite.role)}")
+    logger.info(f"Invite validated successfully - Type: {invite.invite_type}")
 
     try:
         # Check if user with this email already exists
         existing_user = UserService.get_user_by_email(db, request.email)
-        print(f"\nExisting user check: {'Found' if existing_user else 'Not found'}")
 
         # Handle based on invite type
         if invite.invite_type == InviteType.PLATFORM:
-            print("\n" + "=" * 80)
-            print("=== PLATFORM INVITE FLOW ===")
-            print("=" * 80)
+            logger.info("Processing platform invite registration")
 
             if existing_user:
-                print("ERROR: User already exists for platform invite")
+                logger.warning("Platform invite registration failed: User already exists")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="User with this email already exists. Platform invites are for new users only."
                 )
 
             # Create the user
-            print("\n[1] Creating new user...")
+            logger.debug("Creating new user")
             user = UserService.create_user(
                 db=db,
                 email=request.email,
                 password=request.password,
                 full_name=request.full_name
             )
-            print(f"  ✓ User created")
-            print(f"    - ID: {user.id}")
-            print(f"    - Email: {user.email}")
-            print(f"    - Name: {user.full_name}")
+            logger.info(f"User created successfully - ID: {user.id}")
 
             # AUTO-CREATE DEFAULT BUSINESS FOR NEW USER
-            print("\n[2] Creating default business...")
+            logger.debug("Creating default business for new user")
             default_business = BusinessService.create_default_business(db, user.id)
-            print(f"  ✓ Business created")
-            print(f"    - ID: {default_business.id}")
-            print(f"    - Name: {default_business.name}")
+            logger.info(f"Default business created - ID: {default_business.id}")
 
             user.active_business_id = default_business.id
             db.flush()
-            print(f"  ✓ Set active_business_id to {default_business.id}")
 
             # Link user to business
-            print("\n[3] Linking user to business")
-            print("=" * 80)
+            logger.debug("Linking user to business as OWNER")
             association_id = uuid.uuid4()
-            print(f"  - association_id: {association_id} (type: {type(association_id)})")
-            print(f"  - user_id: {user.id} (type: {type(user.id)})")
-            print(f"  - business_id: {default_business.id} (type: {type(default_business.id)})")
-            print(f"  - role: 'owner' (hardcoded string)")
-
             stmt = user_business_association.insert().values(
                 id=association_id,
                 user_id=user.id,
@@ -264,60 +247,42 @@ async def register(
                 role=BusinessRole.OWNER
             )
 
-            print(f"\n  Executing INSERT statement...")
-            print(f"  Statement object: {stmt}")
-            print(f"  Statement compile: {stmt.compile(compile_kwargs={'literal_binds': True})}")
-
             try:
-                result = db.execute(stmt)
-                print(f"  ✓ INSERT executed successfully")
-                print(f"  Result: {result}")
+                db.execute(stmt)
+                logger.info("User-business association created successfully")
             except Exception as insert_error:
-                print("\n" + "!" * 80)
-                print("!!! INSERT FAILED !!!")
-                print("!" * 80)
-                print(f"  Error type: {type(insert_error).__name__}")
-                print(f"  Error message: {str(insert_error)}")
-                print(f"  Error args: {insert_error.args}")
-                if hasattr(insert_error, 'orig'):
-                    print(f"  Original error: {insert_error.orig}")
-                print("!" * 80)
+                logger.error(
+                    f"Failed to create user-business association: {type(insert_error).__name__} - {str(insert_error)}")
                 raise
 
             # Mark the platform invite as used
-            print("\n[4] Marking platform invite as used...")
+            logger.debug("Marking platform invite as used")
             PlatformInviteService.use_platform_invite(db, invite.id)
-            print("  ✓ Invite marked as used")
 
             # Create email verification token
-            print("\n[5] Creating email verification token...")
+            logger.debug("Creating email verification token")
             verification = EmailVerification.create_for_user(user.id, expiry_hours=24)
             db.add(verification)
             db.commit()
             db.refresh(verification)
-            print(f"  ✓ Verification token created: {verification.token[:20]}...")
 
             # Send verification email via Celery
-            print("\n[6] Sending verification email...")
+            logger.info("Queuing verification email task")
             send_verification_email.delay(
                 email=user.email,
                 token=verification.token,
                 user_name=user.full_name
             )
-            print("  ✓ Email task queued")
 
             # Generate tokens and set cookies
-            print("\n[7] Generating auth tokens...")
+            logger.debug("Generating authentication tokens")
             access_token = create_access_token(
                 data={"sub": str(user.id), "email": user.email}
             )
             refresh_token_obj = create_refresh_token(db, user.id)
             set_auth_cookies(response, access_token, refresh_token_obj.token)
-            print("  ✓ Tokens generated and cookies set")
 
-            print("\n" + "=" * 80)
-            print("=== REGISTRATION COMPLETE ===")
-            print("=" * 80 + "\n")
+            logger.info(f"Platform registration completed successfully - User ID: {user.id}")
 
             return MessageResponse(
                 message="Registration successful! Your business has been created.",
@@ -331,31 +296,27 @@ async def register(
                 }
             )
         else:
-            print("\n" + "=" * 80)
-            print("=== BUSINESS INVITE FLOW ===")
-            print("=" * 80)
+            logger.info("Processing business invite registration")
 
             # BUSINESS INVITE logic
             if not invite.business_id:
-                print("ERROR: Business invite missing business_id")
+                logger.error("Business invite missing business_id")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Business invite is missing business_id"
                 )
 
-            print(f"Business ID from invite: {invite.business_id}")
-
             if not existing_user:
-                print("\n[1] Creating new user...")
+                logger.debug("Creating new user for business invite")
                 user = UserService.create_user(
                     db=db,
                     email=request.email,
                     password=request.password,
                     full_name=request.full_name
                 )
-                print(f"  ✓ User created: {user.id}")
+                logger.info(f"New user created - ID: {user.id}")
             else:
-                print("\n[1] Using existing user...")
+                logger.debug("Using existing user for business invite")
                 existing_role = UserService.get_user_role_in_business(
                     db=db,
                     user_id=existing_user.id,
@@ -363,21 +324,15 @@ async def register(
                 )
 
                 if existing_role:
-                    print(f"ERROR: User already member with role: {existing_role}")
+                    logger.warning(f"Business invite failed: User already member with role {existing_role}")
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="User is already a member of this business"
                     )
                 user = existing_user
-                print(f"  ✓ Existing user: {user.id}")
 
             business_role = invite.role
-            print(f"\n[2] Adding user to business")
-            print(f"  - user_id: {user.id}")
-            print(f"  - business_id: {invite.business_id}")
-            print(f"  - role from invite: {business_role}")
-            print(f"  - role type: {type(business_role)}")
-            print(f"  - role repr: {repr(business_role)}")
+            logger.debug(f"Adding user to business with role: {business_role}")
 
             try:
                 UserService.add_user_to_business(
@@ -386,51 +341,41 @@ async def register(
                     business_id=invite.business_id,
                     role=business_role
                 )
-                print("  ✓ User added to business successfully")
+                logger.info("User added to business successfully")
             except Exception as add_error:
-                print("\n" + "!" * 80)
-                print("!!! ADD USER TO BUSINESS FAILED !!!")
-                print("!" * 80)
-                print(f"  Error type: {type(add_error).__name__}")
-                print(f"  Error message: {str(add_error)}")
-                if hasattr(add_error, 'orig'):
-                    print(f"  Original error: {add_error.orig}")
-                print("!" * 80)
+                logger.error(f"Failed to add user to business: {type(add_error).__name__} - {str(add_error)}")
                 raise
 
-            print("\n[3] Marking business invite as used...")
+            logger.debug("Marking business invite as used")
             BusinessInviteService.use_business_invite(db, invite.id)
-            print("  ✓ Invite marked as used")
 
             if not existing_user:
-                print("\n[4] Creating verification for new user...")
+                logger.debug("Creating verification token for new user")
                 verification = EmailVerification.create_for_user(user.id, expiry_hours=24)
                 db.add(verification)
                 db.commit()
                 db.refresh(verification)
 
+                logger.info("Queuing verification email task")
                 send_verification_email.delay(
                     email=user.email,
                     token=verification.token,
                     user_name=user.full_name
                 )
-                print("  ✓ Verification email queued")
 
             # Generate tokens and set cookies
-            print("\n[5] Generating auth tokens...")
+            logger.debug("Generating authentication tokens")
             access_token = create_access_token(
                 data={"sub": str(user.id), "email": user.email}
             )
             refresh_token_obj = create_refresh_token(db, user.id)
             set_auth_cookies(response, access_token, refresh_token_obj.token)
-            print("  ✓ Tokens set")
 
             from app.models.business.business import Business
             business = db.query(Business).filter(Business.id == invite.business_id).first()
 
-            print("\n" + "=" * 80)
-            print("=== REGISTRATION COMPLETE ===")
-            print("=" * 80 + "\n")
+            logger.info(
+                f"Business registration completed successfully - User ID: {user.id}, Business ID: {invite.business_id}")
 
             return MessageResponse(
                 message=f"Registration successful! You've been added to {business.name if business else 'the business'}.",
@@ -447,26 +392,15 @@ async def register(
             )
 
     except ValueError as e:
-        print(f"\nValueError caught: {str(e)}")
+        logger.warning(f"Registration validation error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except HTTPException:
-        print("\nHTTPException caught - re-raising")
         raise
     except Exception as e:
-        print("\n" + "!" * 80)
-        print("!!! UNEXPECTED ERROR !!!")
-        print("!" * 80)
-        print(f"  Error type: {type(e).__name__}")
-        print(f"  Error message: {str(e)}")
-        print(f"  Error args: {e.args}")
-        if hasattr(e, '__traceback__'):
-            import traceback
-            print("\nTraceback:")
-            traceback.print_exc()
-        print("!" * 80 + "\n")
+        logger.error(f"Unexpected registration error: {type(e).__name__} - {str(e)}", exc_info=True)
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -484,6 +418,8 @@ async def login(
     Login with email and password.
     Sets httpOnly cookies for authentication.
     """
+    logger.info("Login attempt started")
+
     user = UserService.authenticate_user(
         db=db,
         email=request.email,
@@ -491,6 +427,7 @@ async def login(
     )
 
     if not user:
+        logger.warning("Login failed: Invalid credentials")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -506,12 +443,15 @@ async def login(
     # Set cookies
     set_auth_cookies(response, access_token, refresh_token_obj.token)
 
+    logger.info(f"Login successful - User ID: {user.id}")
+
     return TokenResponse(
         user_id=str(user.id),
         email=user.email,
         full_name=user.full_name,
         active_business_id=str(user.active_business_id) if user.active_business_id else None,
-        is_verified=user.is_verified
+        is_verified=user.is_verified,
+        role=user.role.value
     )
 
 
@@ -524,10 +464,13 @@ async def refresh_access_token(
     """
     Refresh an access token using the refresh token from cookies.
     """
+    logger.debug("Token refresh attempt")
+
     # Get refresh token from cookie
     refresh_token_value = request.cookies.get(REFRESH_TOKEN_COOKIE)
 
     if not refresh_token_value:
+        logger.warning("Token refresh failed: No refresh token in cookies")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token not found",
@@ -538,6 +481,7 @@ async def refresh_access_token(
     refresh_token = verify_refresh_token(db, refresh_token_value)
 
     if not refresh_token:
+        logger.warning("Token refresh failed: Invalid or expired token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired refresh token",
@@ -548,6 +492,7 @@ async def refresh_access_token(
     user = db.query(User).filter(User.id == refresh_token.user_id).first()
 
     if not user or not user.is_active:
+        logger.warning(f"Token refresh failed: User not found or inactive - User ID: {refresh_token.user_id}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
@@ -573,12 +518,15 @@ async def refresh_access_token(
         max_age=60 * 15,  # 15 minutes
     )
 
+    logger.info(f"Token refresh successful - User ID: {user.id}")
+
     return TokenResponse(
         user_id=str(user.id),
         email=user.email,
         full_name=user.full_name,
         active_business_id=str(user.active_business_id) if user.active_business_id else None,
-        is_verified=user.is_verified
+        is_verified=user.is_verified,
+        role=user.role.value
     )
 
 
@@ -592,6 +540,8 @@ async def logout(
     """
     Logout by revoking the refresh token and clearing cookies.
     """
+    logger.info(f"Logout - User ID: {current_user.id}")
+
     # Get refresh token from cookie
     refresh_token_value = request.cookies.get(REFRESH_TOKEN_COOKIE)
 
@@ -615,10 +565,14 @@ async def logout_all_devices(
     """
     Logout from all devices by revoking all refresh tokens.
     """
+    logger.info(f"Logout from all devices - User ID: {current_user.id}")
+
     count = revoke_all_user_tokens(db, current_user.id)
 
     # Clear cookies
     clear_auth_cookies(response)
+
+    logger.info(f"Revoked {count} tokens for User ID: {current_user.id}")
 
     return MessageResponse(
         message=f"Successfully logged out from all devices",
@@ -627,7 +581,7 @@ async def logout_all_devices(
 
 
 # ============================================================================
-# Email Verification, Password Reset, etc. (unchanged)
+# Email Verification, Password Reset, etc.
 # ============================================================================
 
 @router.post("/verify-email", response_model=MessageResponse)
@@ -636,17 +590,21 @@ async def verify_email(
         db: Session = Depends(get_db)
 ):
     """Verify user's email address using the verification token sent via email."""
+    logger.info("Email verification attempt")
+
     verification = db.query(EmailVerification).filter(
         EmailVerification.token == request.token
     ).first()
 
     if not verification:
+        logger.warning("Email verification failed: Invalid token")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invalid verification token"
         )
 
     if not verification.is_valid():
+        logger.warning("Email verification failed: Token expired or already used")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Verification token has expired or already been used"
@@ -656,6 +614,8 @@ async def verify_email(
     user = verification.user
     user.is_verified = True
     db.commit()
+
+    logger.info(f"Email verified successfully - User ID: {user.id}")
 
     return MessageResponse(
         message="Email verified successfully!",
@@ -672,7 +632,10 @@ async def resend_verification_email(
         current_user: User = Depends(get_current_user)
 ):
     """Resend email verification link."""
+    logger.info(f"Resend verification email - User ID: {current_user.id}")
+
     if current_user.is_verified:
+        logger.warning(f"Resend verification failed: Email already verified - User ID: {current_user.id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email is already verified"
@@ -694,6 +657,8 @@ async def resend_verification_email(
         user_name=current_user.full_name
     )
 
+    logger.info(f"Verification email queued - User ID: {current_user.id}")
+
     return MessageResponse(
         message="Verification email sent!",
         details={"email": current_user.email}
@@ -706,9 +671,13 @@ async def forgot_password(
         db: Session = Depends(get_db)
 ):
     """Request a password reset link."""
+    logger.info("Password reset requested")
+
     user = UserService.get_user_by_email(db, request.email)
 
     if user and user.is_active:
+        logger.info(f"Generating password reset token - User ID: {user.id}")
+
         db.query(PasswordReset).filter(
             PasswordReset.user_id == user.id,
             PasswordReset.is_used == False
@@ -724,7 +693,10 @@ async def forgot_password(
             token=reset_token.token,
             user_name=user.full_name
         )
+    else:
+        logger.debug("Password reset requested for non-existent/inactive user")
 
+    # Always return success to prevent email enumeration
     return MessageResponse(
         message="If an account exists with that email, a password reset link has been sent."
     )
@@ -736,17 +708,21 @@ async def reset_password(
         db: Session = Depends(get_db)
 ):
     """Reset password using the token sent via email."""
+    logger.info("Password reset attempt")
+
     reset_token = db.query(PasswordReset).filter(
         PasswordReset.token == request.token
     ).first()
 
     if not reset_token:
+        logger.warning("Password reset failed: Invalid token")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invalid or expired reset token"
         )
 
     if not reset_token.is_valid():
+        logger.warning("Password reset failed: Token expired or already used")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Reset token has expired or already been used"
@@ -757,6 +733,8 @@ async def reset_password(
     reset_token.mark_as_used()
     revoke_all_user_tokens(db, user.id)
     db.commit()
+
+    logger.info(f"Password reset successful - User ID: {user.id}")
 
     return MessageResponse(
         message="Password reset successful!",
@@ -771,6 +749,8 @@ async def change_password(
         current_user: User = Depends(get_current_active_user)
 ):
     """Change password for the currently logged-in user."""
+    logger.info(f"Password change attempt - User ID: {current_user.id}")
+
     success = UserService.change_password(
         db=db,
         user_id=current_user.id,
@@ -779,12 +759,15 @@ async def change_password(
     )
 
     if not success:
+        logger.warning(f"Password change failed: Incorrect old password - User ID: {current_user.id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Incorrect old password"
         )
 
     revoke_all_user_tokens(db, current_user.id)
+
+    logger.info(f"Password changed successfully - User ID: {current_user.id}")
 
     return MessageResponse(
         message="Password changed successfully!"
@@ -798,15 +781,19 @@ async def validate_invite(
         db: Session = Depends(get_db)
 ):
     """Validate an invite token before registration."""
+    logger.info("Invite validation requested")
+
     is_valid, error_msg, invite = InviteService.validate_invite(db, token, email)
 
     if not is_valid or not invite:
+        logger.warning(f"Invite validation failed: {error_msg}")
         return InviteValidationResponse(
             valid=False,
             message=error_msg or "Invalid invite"
         )
 
     if invite.invite_type == InviteType.PLATFORM:
+        logger.info("Valid platform invite")
         return InviteValidationResponse(
             valid=True,
             message="Valid platform invite",
@@ -818,6 +805,7 @@ async def validate_invite(
         from app.models.business.business import Business
         business = db.query(Business).filter(Business.id == invite.business_id).first()
 
+        logger.info(f"Valid business invite - Business ID: {invite.business_id}")
         return InviteValidationResponse(
             valid=True,
             message=f"Valid business invite",
@@ -838,5 +826,6 @@ async def get_current_user_info(
         email=current_user.email,
         full_name=current_user.full_name,
         active_business_id=str(current_user.active_business_id) if current_user.active_business_id else None,
-        is_verified=current_user.is_verified
+        is_verified=current_user.is_verified,
+        role=current_user.role.value
     )

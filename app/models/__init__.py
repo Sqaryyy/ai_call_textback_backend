@@ -11,7 +11,6 @@ from app.models.appointment.calendar_integration import CalendarIntegration
 from app.models.appointment.availability import AvailabilityRule, AvailabilityOverride
 from app.models.auth.api_key import APIKey
 from .api_request_log import APIRequestLog
-from app.models.business.business_knowledge import BusinessKnowledge
 from app.models.conversation.conversation_metrics import ConversationMetrics
 from app.models.auth.user import User
 from app.models.auth.refresh_token import RefreshToken
@@ -38,7 +37,6 @@ __all__ = [
     "AvailabilityOverride",
     "APIKey",
     "APIRequestLog",
-    "BusinessKnowledge",
     "ConversationMetrics",
     "User",
     "RefreshToken",

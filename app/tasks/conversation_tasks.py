@@ -3,7 +3,7 @@ import json
 import re
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.config.celery_config import celery_app
 from app.config.database import get_db
@@ -11,12 +11,13 @@ from app.services.conversation.conversation_service import ConversationService
 from app.services.conversation.conversation_state_service import ConversationStateService
 from app.services.conversation.conversation_metrics_service import ConversationMetricsService
 from app.services.message.message_service import MessageService
-from app.models.conversation.conversation_metrics import ConversationMetrics
+from app.models.conversation.conversation_metrics import ConversationMetrics, ConversationStatus
 from app.services.business.business_service import BusinessService
 from app.services.appointment.appointment_service import AppointmentService
 from app.services.ai.ai_service import AIService
 from app.services.twilio.sms_service import SMSService
 from app.tasks.calendar_tasks import sync_appointment_to_calendar
+from app.tasks.sms_tasks import send_sms_reply
 
 logger = logging.getLogger(__name__)
 
@@ -89,27 +90,70 @@ def process_sms_message(
             # 3. METRICS: Mark customer responded on first message
             ConversationMetricsService.mark_customer_responded(db, conversation_id)
 
-            # Check if conversation went cold and mark as dropped off
+            # ============================================
+            # HANDLE CONVERSATION STATE TRANSITIONS
+            # ============================================
             messages = MessageService.get_conversation_messages(db, conversation_id)
             if len(messages) > 0:
                 last_message = messages[-1]
                 time_since_last = (datetime.now() - last_message.created_at).total_seconds()
 
-                # If more than 2 hours since last message, previous conversation dropped off
-                if time_since_last > 7200:  # 2 hours
-                    metrics = db.query(ConversationMetrics).filter(
-                        ConversationMetrics.conversation_id == conversation_id
-                    ).first()
+                # Get current metrics
+                metrics = db.query(ConversationMetrics).filter(
+                    ConversationMetrics.conversation_id == conversation_id
+                ).first()
 
-                    # Only mark as dropped if conversation wasn't already completed
-                    if metrics and not metrics.conversation_completed and not metrics.booking_created:
+                if metrics:
+                    grace_period_seconds = 900  # 15 minutes
+                    drop_off_seconds = 7200  # 2 hours
+
+                    # Case 1: Soft-closed conversation, customer returns WITHIN grace period
+                    if (metrics.conversation_status == ConversationStatus.soft_close
+                        and time_since_last < grace_period_seconds):
+
+                        logger.info(f"🔄 Reopening soft-closed conversation (within {grace_period_seconds/60} min grace period)")
+                        ConversationMetricsService.reopen_conversation(db, conversation_id)
+
+                    # Case 2: Soft-closed conversation, grace period EXPIRED
+                    elif (metrics.conversation_status == ConversationStatus.soft_close
+                          and time_since_last >= grace_period_seconds):
+
+                        logger.info(f"✅ Finalizing soft-closed conversation (grace period expired)")
+                        ConversationMetricsService.finalize_soft_close(db, conversation_id)
+
+                        # Create new conversation for this message
+                        conversation = ConversationService.create_conversation(
+                            db, sender_phone, business_phone, business.id
+                        )
+                        conversation_id = str(conversation.id)
+                        logger.info(f"Created new conversation after finalized soft-close: {conversation_id}")
+
+                        # Mark customer responded for new conversation
+                        ConversationMetricsService.mark_customer_responded(db, conversation_id)
+
+                    # Case 3: Active conversation, 2+ hours of inactivity = dropped off
+                    elif (time_since_last > drop_off_seconds
+                          and metrics.conversation_status == ConversationStatus.active
+                          and not metrics.conversation_completed
+                          and not metrics.booking_created):
+
+                        logger.info(f"📉 Marking previous conversation as dropped off (inactive for {time_since_last/3600:.1f} hours)")
                         ConversationMetricsService.mark_conversation_completed(
                             db=db,
                             conversation_id=conversation_id,
                             last_flow_state=conversation.flow_state,
                             dropped_off=True
                         )
-                        logger.info(f"Marked previous conversation as dropped off (inactive for {time_since_last/3600:.1f} hours)")
+
+                        # Create new conversation
+                        conversation = ConversationService.create_conversation(
+                            db, sender_phone, business_phone, business.id
+                        )
+                        conversation_id = str(conversation.id)
+                        logger.info(f"Created new conversation after drop-off: {conversation_id}")
+
+                        # Mark customer responded for new conversation
+                        ConversationMetricsService.mark_customer_responded(db, conversation_id)
 
             # 4. Get or create conversation state
             conv_state = ConversationStateService.get_or_create_state(
@@ -178,7 +222,8 @@ def process_sms_message(
                     "flow_state": conv_state.flow_state,
                     "customer_info": conv_state.state_data.get("customer_info", {})
                 },
-                db=db
+                db=db,
+                conversation_id=conversation_id  # Pass conversation_id for signal detection
             )
 
             # 9. Handle function calls in a loop
@@ -362,31 +407,28 @@ def process_sms_message(
                         "flow_state": conv_state.flow_state,
                         "customer_info": conv_state.state_data.get("customer_info", {})
                     },
-                    db=db
+                    db=db,
+                    conversation_id=conversation_id
                 )
 
-            # 10. Send final AI response via SMS
+            # 10. Send final AI response via SMS (queued with retries)
             if ai_response.get("content"):
-                sms_service = SMSService()
-                result = sms_service.send_sms(
+                conversation_signal = ai_response.get("conversation_signal", "active")
+
+                # Queue SMS reply as separate task with automatic retries
+                send_sms_reply.delay(
                     to_phone=sender_phone,
                     from_phone=business_phone,
                     message_body=ai_response["content"],
                     conversation_id=conversation_id,
                     correlation_id=correlation_id,
-                    db=db
+                    conversation_signal=conversation_signal
                 )
 
-                # METRICS: Track bot message
-                if result["success"]:
-                    ConversationMetricsService.increment_message_count(
-                        db=db,
-                        conversation_id=conversation_id,
-                        is_customer_message=False
-                    )
-                    logger.info(f"SMS sent successfully: {result['message_sid']}")
-                else:
-                    logger.error(f"SMS failed to send: {result.get('error')}")
+                logger.info(
+                    f"📤 SMS reply queued for sending to {sender_phone} "
+                    f"(signal: {conversation_signal})"
+                )
 
             logger.info(f"Successfully processed SMS {message_sid}")
             return {"status": "completed", "message_sid": message_sid}
@@ -397,3 +439,53 @@ def process_sms_message(
     except Exception as exc:
         logger.error(f"Error processing SMS {message_sid}: {str(exc)}", exc_info=True)
         raise self.retry(countdown=60 * (self.request.retries + 1))
+
+
+@celery_app.task
+def finalize_stale_soft_closes():
+    """
+    Daily cleanup task to finalize soft-closed conversations older than 2 hours.
+    Runs once per day at 3 AM via Celery Beat.
+
+    This ensures conversations that naturally ended but never got a follow-up
+    are properly marked as complete for analytics purposes.
+    """
+    try:
+        db = next(get_db())
+
+        cutoff_time = datetime.utcnow() - timedelta(hours=2)
+
+        # Find all soft_closed conversations older than 2 hours
+        stale_metrics = db.query(ConversationMetrics).filter(
+            ConversationMetrics.conversation_status == ConversationStatus.soft_close,
+            ConversationMetrics.soft_close_at < cutoff_time
+        ).all()
+
+        finalized_count = 0
+        error_count = 0
+
+        for metrics in stale_metrics:
+            try:
+                ConversationMetricsService.finalize_soft_close(
+                    db=db,
+                    conversation_id=str(metrics.conversation_id)
+                )
+                finalized_count += 1
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Error finalizing conversation {metrics.conversation_id}: {e}")
+                continue
+
+        logger.info(f"✅ Daily cleanup: Finalized {finalized_count} stale soft-closed conversations (errors: {error_count})")
+        return {
+            "status": "completed",
+            "finalized": finalized_count,
+            "errors": error_count,
+            "cutoff_time": cutoff_time.isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error in finalize_stale_soft_closes task: {e}", exc_info=True)
+        raise
+    finally:
+        db.close()
